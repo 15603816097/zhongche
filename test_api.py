@@ -1,105 +1,156 @@
+# test_api.py
 import csv
 import json
+import os
+import sys
+from typing import Dict, List
+
 import requests
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import threading
 
-PREDICT_URL = "http://180.127.11.167:10670/predict"
-TEST_SEQ = "sequence0001"
-FAKE_CALLBACK_PORT = 8888
-CALLBACK_TOKEN = "test_token_123"
+PREDICT_URL = os.getenv("PREDICT_URL", "http://127.0.0.1:8800/predict")
+TEST_SEQ = os.getenv("TEST_SEQ", "sequence0001")
 DATA_PATH = f"./data/raw/{TEST_SEQ}/history.csv"
+
 TARGET_COLUMNS = [
-    "vibration_rms", "temperature_c", "current_a",
-    "speed_rpm", "acoustic_db", "pressure_kpa"
+    "vibration_rms",
+    "temperature_c",
+    "current_a",
+    "speed_rpm",
+    "acoustic_db",
+    "pressure_kpa",
 ]
-FORECAST_HORIZON = 96
+
 HISTORY_LENGTH = 512
+FORECAST_HORIZON = 96
 
-received_callback_payload = None
 
-class MockCallbackHandler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        global received_callback_payload
-        length = int(self.headers['Content-Length'])
-        body = self.rfile.read(length)
-        try:
-            received_callback_payload = json.loads(body)
-            print("\n========✅【模拟平台收到你的callback结果】========")
-            print(json.dumps(received_callback_payload, indent=2, ensure_ascii=False))
-        except:
-            received_callback_payload = None
-            print("\n❌ 收到非法JSON")
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b'{"status":"ok"}')
+def load_history_csv(csv_path: str) -> List[Dict]:
+    history = []
 
-    def log_message(self, format, *args):
-        return
-
-def start_mock_callback_server():
-    server = HTTPServer(("127.0.0.1", FAKE_CALLBACK_PORT), MockCallbackHandler)
-    server.serve_forever()
-
-def load_history_csv(csv_path):
-    rows = []
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        for row in reader:
-            arr = [float(row[c]) for c in TARGET_COLUMNS]
-            rows.append(arr)
-    return rows
 
-if __name__ == "__main__":
-    t = threading.Thread(target=start_mock_callback_server, daemon=True)
-    t.start()
-    print(f"🔧模拟评测回调服务已启动：127.0.0.1:{FAKE_CALLBACK_PORT}")
+        for step, row in enumerate(reader):
+            history.append(
+                {
+                    "step": step,
+                    "timestamp": row.get("timestamp", ""),
+                    "values": {
+                        col: float(row[col]) if row[col] not in ("", None) else None
+                        for col in TARGET_COLUMNS
+                    },
+                }
+            )
 
-    history_data = load_history_csv(DATA_PATH)
-    print(f"📄读取history.csv完成，shape={len(history_data)} × {len(history_data[0])}")
+    return history
 
-    request_body = {
-        "requestId": "local-test-seq0001",
-        "model": "rail_forecast_model",
+
+def validate_response(data: Dict) -> None:
+    assert data.get("code") == 0, f"code != 0: {data}"
+
+    predictions = data.get("predictions")
+    assert isinstance(predictions, list), "predictions 不是数组"
+    assert len(predictions) == FORECAST_HORIZON, (
+        f"预测步数错误: {len(predictions)} != {FORECAST_HORIZON}"
+    )
+
+    for expected_step, item in enumerate(predictions):
+        assert item.get("step") == expected_step, (
+            f"step 错误: {item.get('step')} != {expected_step}"
+        )
+
+        values = item.get("values")
+        assert isinstance(values, dict), f"step={expected_step} 缺少 values"
+
+        assert set(values.keys()) == set(TARGET_COLUMNS), (
+            f"step={expected_step} 字段错误: {list(values.keys())}"
+        )
+
+        for col in TARGET_COLUMNS:
+            value = values[col]
+            assert isinstance(value, (int, float)), (
+                f"step={expected_step}, {col} 不是数值: {value}"
+            )
+            assert value == value, f"step={expected_step}, {col} 出现 NaN"
+            assert value not in (float("inf"), float("-inf")), (
+                f"step={expected_step}, {col} 出现 Inf"
+            )
+
+
+def main():
+    print("=" * 70)
+    print("Task3 API 单条请求联调")
+    print("=" * 70)
+    print(f"PREDICT_URL = {PREDICT_URL}")
+    print(f"DATA_PATH   = {DATA_PATH}")
+
+    history = load_history_csv(DATA_PATH)
+    print(f"history shape = {len(history)} x {len(TARGET_COLUMNS)}")
+
+    if len(history) != HISTORY_LENGTH:
+        print(
+            f"警告: 官方固定 history_length={HISTORY_LENGTH}，"
+            f"当前文件实际为 {len(history)}"
+        )
+
+    payload = {
+        "requestId": f"local-test-{TEST_SEQ}",
+        "model": "rail-timeseries-forecast-v1",
         "history_url": "",
-        "history_length": HISTORY_LENGTH,
+        "history_length": len(history),
         "forecast_horizon": FORECAST_HORIZON,
         "sampling_interval_seconds": 1,
         "target_columns": TARGET_COLUMNS,
-        "history": history_data,
-        "callback_url": f"http://127.0.0.1:{FAKE_CALLBACK_PORT}/api/v1/eval/callback",
-        "callback_token": CALLBACK_TOKEN
+        "history": history,
     }
 
-    print("\n🚀向/predict发送测试请求...")
-    resp = requests.post(PREDICT_URL, json=request_body, timeout=30)
-    print(f"/predict接口返回 status={resp.status_code}")
-    print(f"/predict接口返回body: {resp.text[:500]}")
+    headers = {
+        "Content-Type": "application/json",
+        "X-Request-Id": payload["requestId"],
+    }
 
-    print("\n⏳等待callback推送结果(最多等待10s)...")
-    import time
-    for _ in range(10):
-        if received_callback_payload is not None:
-            break
-        time.sleep(1)
+    api_key = os.getenv("API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
-    if received_callback_payload is None:
-        print("\n❌ 10秒没有收到callback回调！")
-    else:
-        preds = received_callback_payload.get("predictions")
-        if preds is None:
-            print("\n❌ callback中缺少 'predictions' 字段！")
-            print("收到的完整payload:", json.dumps(received_callback_payload, indent=2))
-        else:
-            print(f"\n📊 校验 predictions 维度：步数={len(preds)}")
-            if len(preds) == FORECAST_HORIZON:
-                first = preds[0]
-                if "values" in first:
-                    vals = first["values"]
-                    print(f"每步变量数={len(vals)}")
-                    assert len(vals) == len(TARGET_COLUMNS), f"目标列数不对，应该{len(TARGET_COLUMNS)}"
-                    print("✅ 维度校验通过！")
-                else:
-                    print("❌ predictions 元素缺少 'values' 字段")
-            else:
-                print(f"❌ 预测步数不对，应该{FORECAST_HORIZON}，实际{len(preds)}")
+    try:
+        response = requests.post(
+            PREDICT_URL,
+            json=payload,
+            headers=headers,
+            timeout=60,
+        )
+    except Exception as exc:
+        print(f"\n请求失败: {exc}")
+        sys.exit(1)
+
+    print(f"\nHTTP status = {response.status_code}")
+    print(f"response preview = {response.text[:800]}")
+
+    if response.status_code != 200:
+        print("接口没有返回 HTTP 200")
+        sys.exit(1)
+
+    try:
+        data = response.json()
+    except Exception:
+        print("响应不是合法 JSON")
+        sys.exit(1)
+
+    try:
+        validate_response(data)
+    except AssertionError as exc:
+        print(f"\n校验失败: {exc}")
+        sys.exit(1)
+
+    print("\nAPI 校验通过")
+    print("code = 0")
+    print("predictions = 96")
+    print("每步 = 6 个目标字段")
+    print("无 NaN / Inf")
+    print("\n第一步预测:")
+    print(json.dumps(data["predictions"][0], indent=2, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()
