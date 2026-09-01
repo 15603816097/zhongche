@@ -3,12 +3,13 @@ import io
 import os
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 import requests
-from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from config import HORIZON, LOOKBACK, TARGET_COLUMNS
@@ -16,10 +17,19 @@ from src.inference import predict_future
 
 APP_NAME = "Rail Transit Time-Series Forecast API"
 API_KEY = os.getenv("API_KEY", "").strip()
-CALLBACK_TIMEOUT = float(os.getenv("CALLBACK_TIMEOUT", "10"))
-CALLBACK_RETRIES = int(os.getenv("CALLBACK_RETRIES", "3"))
 
-app = FastAPI(title=APP_NAME, version="2.3.0")
+# 官网 50 样本评测时 callback 接收端可能出现瞬时拥塞。
+# 不再使用 FastAPI/Starlette 的 BackgroundTasks 公共线程池，
+# 避免 callback 阻塞与 /predict 请求争抢同一个线程池。
+CALLBACK_TIMEOUT = float(os.getenv("CALLBACK_TIMEOUT", "20"))
+CALLBACK_RETRIES = int(os.getenv("CALLBACK_RETRIES", "5"))
+CALLBACK_WORKERS = max(1, int(os.getenv("CALLBACK_WORKERS", "8")))
+CALLBACK_EXECUTOR = ThreadPoolExecutor(
+    max_workers=CALLBACK_WORKERS,
+    thread_name_prefix="evaluation-callback",
+)
+
+app = FastAPI(title=APP_NAME, version="2.4.0")
 
 
 def ok(body: Dict[str, Any]) -> JSONResponse:
@@ -199,12 +209,14 @@ def build_callback_payload(
     predictions: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """
-    按官网真实校验错误构造回调：
+    已通过官网真实接口验证的 callback 格式。
 
+    固定保持：
     results 必须是 list；
-    results[0] 必须包含 request_id 和 data。
+    results[0] 必须包含 request_id 和 data；
+    data 内为 code/message/predictions。
 
-    data 中放置与单条同步响应一致的业务结果。
+    后续只优化 callback 传输可靠性，不改变该协议结构。
     """
     business_data = {
         "code": int(code),
@@ -221,7 +233,6 @@ def build_callback_payload(
                 "data": business_data,
             }
         ],
-        # 兼容字段；若平台忽略额外字段不会影响主 schema
         "code": int(code),
         "message": str(message),
         "predictions": predictions,
@@ -229,21 +240,29 @@ def build_callback_payload(
 
 
 def send_callback(callback_url: str, body: Dict[str, Any]) -> None:
-    request_id = body.get("requestId")
+    request_id = str(body.get("requestId", "") or "")
+
     for attempt in range(1, CALLBACK_RETRIES + 1):
         try:
             resp = requests.post(
                 callback_url,
                 json=body,
-                headers={"Content-Type": "application/json"},
-                timeout=CALLBACK_TIMEOUT,
+                headers={
+                    "Content-Type": "application/json",
+                    "Connection": "close",
+                },
+                # connect timeout 与 read timeout 分开，避免官网 callback
+                # 在高并发评测时偶发 10 秒以上响应导致过早失败。
+                timeout=(5.0, CALLBACK_TIMEOUT),
             )
+
             if 200 <= resp.status_code < 300:
                 print(
                     f"[CALLBACK OK] requestId={request_id} "
-                    f"status={resp.status_code}"
+                    f"status={resp.status_code} attempt={attempt}"
                 )
                 return
+
             error = f"HTTP {resp.status_code}: {resp.text[:500]}"
         except Exception as exc:
             error = repr(exc)
@@ -252,10 +271,22 @@ def send_callback(callback_url: str, body: Dict[str, Any]) -> None:
             f"[CALLBACK RETRY] requestId={request_id} "
             f"{attempt}/{CALLBACK_RETRIES}: {error}"
         )
+
         if attempt < CALLBACK_RETRIES:
-            time.sleep(attempt)
+            # 短退避，既不给官网 callback 接口造成瞬时重试洪峰，
+            # 又避免整批评测等待过久。
+            time.sleep(min(0.5 * attempt, 2.0))
 
     print(f"[CALLBACK FAILED] requestId={request_id}")
+
+
+def submit_callback(callback_url: str, body: Dict[str, Any]) -> None:
+    request_id = str(body.get("requestId", "") or "")
+    try:
+        CALLBACK_EXECUTOR.submit(send_callback, callback_url, body)
+        print(f"[CALLBACK QUEUED] requestId={request_id}")
+    except Exception as exc:
+        print(f"[CALLBACK QUEUE FAILED] requestId={request_id}: {exc!r}")
 
 
 @app.get("/")
@@ -271,19 +302,18 @@ def root():
 def health():
     return {
         "status": "ok",
-        "version": "2.3.0",
+        "version": "2.4.0",
         "lookback": LOOKBACK,
         "forecast_horizon": HORIZON,
         "target_columns": TARGET_COLUMNS,
+        "callback_timeout": CALLBACK_TIMEOUT,
+        "callback_retries": CALLBACK_RETRIES,
+        "callback_workers": CALLBACK_WORKERS,
     }
 
 
 @app.post("/predict")
-def predict(
-    payload: Dict[str, Any],
-    request: Request,
-    background_tasks: BackgroundTasks,
-):
+def predict(payload: Dict[str, Any], request: Request):
     auth_error = check_api_key(request)
     if auth_error is not None:
         return auth_error
@@ -303,11 +333,7 @@ def predict(
                 message="success",
                 predictions=result["predictions"],
             )
-            background_tasks.add_task(
-                send_callback,
-                callback_url,
-                callback_payload,
-            )
+            submit_callback(callback_url, callback_payload)
 
         return ok(
             {
@@ -331,11 +357,7 @@ def predict(
                 message=str(exc),
                 predictions=[],
             )
-            background_tasks.add_task(
-                send_callback,
-                callback_url,
-                callback_payload,
-            )
+            submit_callback(callback_url, callback_payload)
 
         return fail(str(exc))
 
