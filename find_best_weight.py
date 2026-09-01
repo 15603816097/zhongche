@@ -1,67 +1,137 @@
-# find_best_weight_extended.py
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 import pickle
+
 import numpy as np
-from sklearn.metrics import mean_squared_error
-from config import MODEL_DIR, TEST_SIZE
-from src.trainer import load_all_data  # 复用数据加载函数
 
-# 1. 加载验证集数据
-print("加载验证集数据...")
-X, y = load_all_data()  # 原始特征 + 原始差分（未标准化）
-split_idx = int(len(X) * (1 - TEST_SIZE))
-X_val, y_val = X[split_idx:], y[split_idx:]
-print(f"验证集样本数: {X_val.shape[0]}")
+from config import MODEL_DIR, TARGET_COLUMNS
 
-# 2. 加载两个模型的 scaler 和模型
-print("加载模型...")
-with open(MODEL_DIR / "scaler.pkl", "rb") as f:
-    scalers_lgb = pickle.load(f)
-with open(MODEL_DIR / "scaler_xgb.pkl", "rb") as f:
-    scalers_xgb = pickle.load(f)
 
-with open(MODEL_DIR / "model_lgb.pkl", "rb") as f:
-    model_lgb = pickle.load(f)
-with open(MODEL_DIR / "model_xgb.pkl", "rb") as f:
-    model_xgb = pickle.load(f)
+def rmse(y_true, y_pred):
+    return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
 
-# 3. 预测验证集
-print("预测验证集...")
-# LightGBM 预测
-X_val_scaled_lgb = scalers_lgb["scaler_X"].transform(X_val)
-y_pred_scaled_lgb = model_lgb.predict(X_val_scaled_lgb)
-y_pred_lgb = scalers_lgb["scaler_y"].inverse_transform(y_pred_scaled_lgb)
 
-# XGBoost 预测
-X_val_scaled_xgb = scalers_xgb["scaler_X"].transform(X_val)
-y_pred_scaled_xgb = model_xgb.predict(X_val_scaled_xgb)
-y_pred_xgb = scalers_xgb["scaler_y"].inverse_transform(y_pred_scaled_xgb)
+def direction_accuracy(y_true, y_pred, last_values):
+    true_delta = y_true - last_values[:, None, :]
+    pred_delta = y_pred - last_values[:, None, :]
+    true_sign = np.sign(true_delta)
+    pred_sign = np.sign(pred_delta)
+    return float(np.mean(true_sign == pred_sign))
 
-# y_val 已经是原始尺度差分，无需变换
 
-# 4. 搜索最佳权重（扩展范围 0.30 ~ 0.95，步长 0.05）
-print("\n测试不同权重...")
-print("-" * 60)
-best_rmse = float('inf')
-best_weight = 0.5
+def main():
+    lgb_path = MODEL_DIR / "val_pred_lgb.npz"
+    xgb_path = MODEL_DIR / "val_pred_xgb.npz"
 
-for w_lgb in np.arange(0.30, 0.96, 0.05):
-    w_lgb = round(w_lgb, 2)
-    w_xgb = 1 - w_lgb
-    y_ens = w_lgb * y_pred_lgb + w_xgb * y_pred_xgb
-    rmse = np.sqrt(mean_squared_error(y_val, y_ens))
-    print(f"权重 LightGBM={w_lgb:.2f}, XGBoost={w_xgb:.2f} -> RMSE: {rmse:.4f}")
-    if rmse < best_rmse:
-        best_rmse = rmse
-        best_weight = w_lgb
+    if not lgb_path.exists() or not xgb_path.exists():
+        raise FileNotFoundError(
+            "请先运行 python src/trainer.py 和 "
+            "python src/trainer_xgb.py"
+        )
 
-print("-" * 60)
-print(f"✅ 最佳权重: LightGBM={best_weight:.2f}, XGBoost={1-best_weight:.2f}")
-print(f"   最佳 RMSE (差分尺度): {best_rmse:.4f}")
-print(f"   当前 LightGBM 单独 RMSE: {np.sqrt(mean_squared_error(y_val, y_pred_lgb)):.4f}")
-print(f"   当前 XGBoost 单独 RMSE: {np.sqrt(mean_squared_error(y_val, y_pred_xgb)):.4f}")
-print("\n请将以下参数更新到 src/inference.py 中：")
-print(f"   默认权重 weight_lgb = {best_weight:.2f}")
+    lgb = np.load(lgb_path, allow_pickle=True)
+    xgb = np.load(xgb_path, allow_pickle=True)
+
+    y_true = lgb["y_abs"].astype(np.float64)
+    last_values = lgb["last_values"].astype(np.float64)
+    baseline = lgb["baseline_abs"].astype(np.float64)
+    pred_lgb = lgb["pred_abs"].astype(np.float64)
+    pred_xgb = xgb["pred_abs"].astype(np.float64)
+
+    if not (
+        y_true.shape == pred_lgb.shape == pred_xgb.shape == baseline.shape
+    ):
+        raise ValueError("LGB/XGB 验证预测 shape 不一致")
+
+    n_targets = len(TARGET_COLUMNS)
+    lgb_weights = np.zeros(n_targets, dtype=np.float64)
+    baseline_weights = np.zeros(n_targets, dtype=np.float64)
+
+    print("=" * 80)
+    print("逐变量搜索 LGB/XGB/稳健趋势基线的融合权重")
+    print("目标函数：85% 归一化RMSE + 15% 趋势方向误差")
+    print("=" * 80)
+
+    for j, col in enumerate(TARGET_COLUMNS):
+        yt = y_true[:, :, j]
+        pl = pred_lgb[:, :, j]
+        px = pred_xgb[:, :, j]
+        pb = baseline[:, :, j]
+        last = last_values[:, j]
+
+        scale = float(np.std(yt))
+        if scale < 1e-8:
+            scale = 1.0
+
+        best = None
+
+        for w_lgb in np.arange(0.0, 1.01, 0.1):
+            ml = w_lgb * pl + (1.0 - w_lgb) * px
+
+            for w_base in np.arange(0.0, 0.51, 0.1):
+                pred = (1.0 - w_base) * ml + w_base * pb
+
+                value_rmse = rmse(yt, pred)
+                true_delta = yt - last[:, None]
+                pred_delta = pred - last[:, None]
+                dir_acc = float(
+                    np.mean(np.sign(true_delta) == np.sign(pred_delta))
+                )
+                objective = (
+                    0.85 * (value_rmse / scale)
+                    + 0.15 * (1.0 - dir_acc)
+                )
+
+                candidate = (
+                    objective,
+                    value_rmse,
+                    -dir_acc,
+                    float(w_lgb),
+                    float(w_base),
+                )
+                if best is None or candidate < best:
+                    best = candidate
+
+        _, best_rmse, neg_dir, best_lgb, best_base = best
+        best_dir = -neg_dir
+        lgb_weights[j] = best_lgb
+        baseline_weights[j] = best_base
+
+        print(
+            f"{col:16s} "
+            f"LGB={best_lgb:.2f} XGB={1-best_lgb:.2f} "
+            f"BASE={best_base:.2f} "
+            f"RMSE={best_rmse:.4f} "
+            f"DirAcc={best_dir:.4f}"
+        )
+
+    ml = (
+        lgb_weights.reshape(1, 1, -1) * pred_lgb
+        + (1.0 - lgb_weights.reshape(1, 1, -1)) * pred_xgb
+    )
+    final_pred = (
+        (1.0 - baseline_weights.reshape(1, 1, -1)) * ml
+        + baseline_weights.reshape(1, 1, -1) * baseline
+    )
+
+    overall_rmse = rmse(y_true, final_pred)
+    overall_dir = direction_accuracy(y_true, final_pred, last_values)
+
+    config = {
+        "version": 2,
+        "lgb_weights": lgb_weights.tolist(),
+        "baseline_weights": baseline_weights.tolist(),
+        "target_columns": list(TARGET_COLUMNS),
+        "validation_rmse": overall_rmse,
+        "validation_direction_accuracy": overall_dir,
+    }
+
+    with open(MODEL_DIR / "ensemble_config.pkl", "wb") as f:
+        pickle.dump(config, f)
+
+    print("-" * 80)
+    print(f"整体验证 RMSE: {overall_rmse:.4f}")
+    print(f"整体趋势方向一致率: {overall_dir:.4f}")
+    print(f"已保存: {MODEL_DIR / 'ensemble_config.pkl'}")
+
+
+if __name__ == "__main__":
+    main()
