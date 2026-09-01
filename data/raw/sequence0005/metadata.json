@@ -1,0 +1,11 @@
+{
+  "unique_id": "T3_SAMPLE_0005",
+  "data_source": "public_sample_synthetic",
+  "generation_method": "physics-inspired time-series synthesis, independent from hidden test data",
+  "difficulty": "medium",
+  "scene": "rail_transit_equipment_operation_sample",
+  "device": "bogie_sensor_unit",
+  "capture_time": "2026-07-01T16:00:00",
+  "condition": "missing",
+  "sampling_interval_seconds": 1
+}

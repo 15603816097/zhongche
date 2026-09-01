@@ -1,0 +1,791 @@
+{
+  "sequence_id": "T3_SAMPLE_0003",
+  "history_length": 512,
+  "future_length": 96,
+  "target_columns": [
+    "vibration_rms",
+    "temperature_c",
+    "current_a",
+    "speed_rpm",
+    "acoustic_db",
+    "pressure_kpa"
+  ],
+  "future_values": [
+    {
+      "vibration_rms": 2.81234,
+      "temperature_c": 75.99352,
+      "current_a": 90.87854,
+      "speed_rpm": 783.40567,
+      "acoustic_db": 65.70833,
+      "pressure_kpa": 417.15136
+    },
+    {
+      "vibration_rms": 3.33161,
+      "temperature_c": 81.19832,
+      "current_a": 102.0219,
+      "speed_rpm": 827.47292,
+      "acoustic_db": 66.28223,
+      "pressure_kpa": 401.88396
+    },
+    {
+      "vibration_rms": 2.95534,
+      "temperature_c": 76.62107,
+      "current_a": 101.07418,
+      "speed_rpm": 854.54834,
+      "acoustic_db": 69.36889,
+      "pressure_kpa": 395.26181
+    },
+    {
+      "vibration_rms": 3.34796,
+      "temperature_c": 80.02878,
+      "current_a": 98.96353,
+      "speed_rpm": 815.24095,
+      "acoustic_db": 67.00972,
+      "pressure_kpa": 400.44259
+    },
+    {
+      "vibration_rms": 3.55213,
+      "temperature_c": 78.86226,
+      "current_a": 108.08458,
+      "speed_rpm": 832.57583,
+      "acoustic_db": 65.29883,
+      "pressure_kpa": 399.83664
+    },
+    {
+      "vibration_rms": 3.13624,
+      "temperature_c": 78.91853,
+      "current_a": 95.03185,
+      "speed_rpm": 784.89889,
+      "acoustic_db": 66.55515,
+      "pressure_kpa": 407.94309
+    },
+    {
+      "vibration_rms": 3.23294,
+      "temperature_c": 85.82176,
+      "current_a": 107.69766,
+      "speed_rpm": 845.45835,
+      "acoustic_db": 66.94456,
+      "pressure_kpa": 390.46453
+    },
+    {
+      "vibration_rms": 3.37381,
+      "temperature_c": 76.04152,
+      "current_a": 88.9602,
+      "speed_rpm": 794.20951,
+      "acoustic_db": 63.63658,
+      "pressure_kpa": 421.74847
+    },
+    {
+      "vibration_rms": 3.80917,
+      "temperature_c": 78.26039,
+      "current_a": 91.52895,
+      "speed_rpm": 791.71188,
+      "acoustic_db": 67.03648,
+      "pressure_kpa": 420.03167
+    },
+    {
+      "vibration_rms": 3.82314,
+      "temperature_c": 76.75322,
+      "current_a": 91.88444,
+      "speed_rpm": 791.05597,
+      "acoustic_db": 69.14384,
+      "pressure_kpa": 413.81191
+    },
+    {
+      "vibration_rms": 3.58793,
+      "temperature_c": 75.98468,
+      "current_a": 89.27259,
+      "speed_rpm": 803.13019,
+      "acoustic_db": 66.32315,
+      "pressure_kpa": 416.63029
+    },
+    {
+      "vibration_rms": 3.51778,
+      "temperature_c": 83.61423,
+      "current_a": 102.10156,
+      "speed_rpm": 818.1829,
+      "acoustic_db": 68.65032,
+      "pressure_kpa": 402.75052
+    },
+    {
+      "vibration_rms": 3.34019,
+      "temperature_c": 86.45433,
+      "current_a": 92.24357,
+      "speed_rpm": 788.05393,
+      "acoustic_db": 69.64276,
+      "pressure_kpa": 419.52067
+    },
+    {
+      "vibration_rms": 3.52251,
+      "temperature_c": 75.42833,
+      "current_a": 85.18104,
+      "speed_rpm": 796.46961,
+      "acoustic_db": 64.28541,
+      "pressure_kpa": 415.73903
+    },
+    {
+      "vibration_rms": 3.94965,
+      "temperature_c": 75.46703,
+      "current_a": 93.92375,
+      "speed_rpm": 840.01146,
+      "acoustic_db": 71.55966,
+      "pressure_kpa": 410.41279
+    },
+    {
+      "vibration_rms": 3.97534,
+      "temperature_c": 76.64131,
+      "current_a": 97.29424,
+      "speed_rpm": 838.43455,
+      "acoustic_db": 67.96994,
+      "pressure_kpa": 406.73751
+    },
+    {
+      "vibration_rms": 4.04046,
+      "temperature_c": 82.3416,
+      "current_a": 106.27602,
+      "speed_rpm": 838.25304,
+      "acoustic_db": 65.77636,
+      "pressure_kpa": 398.89798
+    },
+    {
+      "vibration_rms": 4.03013,
+      "temperature_c": 83.18334,
+      "current_a": 102.45798,
+      "speed_rpm": 810.15282,
+      "acoustic_db": 69.93236,
+      "pressure_kpa": 399.13847
+    },
+    {
+      "vibration_rms": 3.83118,
+      "temperature_c": 85.94691,
+      "current_a": 103.94148,
+      "speed_rpm": 843.38727,
+      "acoustic_db": 68.97407,
+      "pressure_kpa": 389.39268
+    },
+    {
+      "vibration_rms": 3.74446,
+      "temperature_c": 83.30504,
+      "current_a": 99.51308,
+      "speed_rpm": 820.04114,
+      "acoustic_db": 67.76059,
+      "pressure_kpa": 404.14158
+    },
+    {
+      "vibration_rms": 4.09595,
+      "temperature_c": 82.47464,
+      "current_a": 104.31179,
+      "speed_rpm": 833.77016,
+      "acoustic_db": 65.86042,
+      "pressure_kpa": 393.80081
+    },
+    {
+      "vibration_rms": 3.51065,
+      "temperature_c": 78.92301,
+      "current_a": 96.55936,
+      "speed_rpm": 789.44994,
+      "acoustic_db": 64.82496,
+      "pressure_kpa": 410.47958
+    },
+    {
+      "vibration_rms": 4.1515,
+      "temperature_c": 83.33098,
+      "current_a": 102.96606,
+      "speed_rpm": 823.65593,
+      "acoustic_db": 71.4897,
+      "pressure_kpa": 397.21191
+    },
+    {
+      "vibration_rms": 4.13595,
+      "temperature_c": 89.50423,
+      "current_a": 88.84702,
+      "speed_rpm": 792.57207,
+      "acoustic_db": 68.6604,
+      "pressure_kpa": 416.86172
+    },
+    {
+      "vibration_rms": 4.0874,
+      "temperature_c": 80.23731,
+      "current_a": 104.1463,
+      "speed_rpm": 869.70608,
+      "acoustic_db": 66.50343,
+      "pressure_kpa": 393.4643
+    },
+    {
+      "vibration_rms": 3.60892,
+      "temperature_c": 79.17975,
+      "current_a": 93.00986,
+      "speed_rpm": 781.93715,
+      "acoustic_db": 64.8783,
+      "pressure_kpa": 415.24713
+    },
+    {
+      "vibration_rms": 3.92511,
+      "temperature_c": 79.3135,
+      "current_a": 102.10339,
+      "speed_rpm": 845.61431,
+      "acoustic_db": 66.65555,
+      "pressure_kpa": 392.7659
+    },
+    {
+      "vibration_rms": 3.74269,
+      "temperature_c": 81.7551,
+      "current_a": 94.25507,
+      "speed_rpm": 789.93075,
+      "acoustic_db": 66.1805,
+      "pressure_kpa": 409.29244
+    },
+    {
+      "vibration_rms": 3.85873,
+      "temperature_c": 79.03365,
+      "current_a": 101.13531,
+      "speed_rpm": 853.09537,
+      "acoustic_db": 67.12917,
+      "pressure_kpa": 387.01327
+    },
+    {
+      "vibration_rms": 3.68764,
+      "temperature_c": 87.19623,
+      "current_a": 97.10673,
+      "speed_rpm": 807.75553,
+      "acoustic_db": 69.56185,
+      "pressure_kpa": 410.77826
+    },
+    {
+      "vibration_rms": 4.44165,
+      "temperature_c": 84.13523,
+      "current_a": 100.78476,
+      "speed_rpm": 814.36394,
+      "acoustic_db": 71.01813,
+      "pressure_kpa": 397.34819
+    },
+    {
+      "vibration_rms": 3.75509,
+      "temperature_c": 79.83294,
+      "current_a": 92.40034,
+      "speed_rpm": 775.1254,
+      "acoustic_db": 66.84295,
+      "pressure_kpa": 411.74334
+    },
+    {
+      "vibration_rms": 3.9068,
+      "temperature_c": 88.00079,
+      "current_a": 98.53153,
+      "speed_rpm": 795.25708,
+      "acoustic_db": 70.04479,
+      "pressure_kpa": 410.07528
+    },
+    {
+      "vibration_rms": 3.92173,
+      "temperature_c": 90.36598,
+      "current_a": 104.81,
+      "speed_rpm": 845.45907,
+      "acoustic_db": 69.4929,
+      "pressure_kpa": 392.96611
+    },
+    {
+      "vibration_rms": 3.94317,
+      "temperature_c": 87.95174,
+      "current_a": 96.0841,
+      "speed_rpm": 797.22198,
+      "acoustic_db": 70.06076,
+      "pressure_kpa": 413.35446
+    },
+    {
+      "vibration_rms": 4.12226,
+      "temperature_c": 82.8526,
+      "current_a": 99.86209,
+      "speed_rpm": 790.51673,
+      "acoustic_db": 69.4775,
+      "pressure_kpa": 406.80318
+    },
+    {
+      "vibration_rms": 4.08395,
+      "temperature_c": 92.56753,
+      "current_a": 93.97175,
+      "speed_rpm": 844.70501,
+      "acoustic_db": 66.42482,
+      "pressure_kpa": 397.53145
+    },
+    {
+      "vibration_rms": 3.9974,
+      "temperature_c": 86.86946,
+      "current_a": 101.64949,
+      "speed_rpm": 805.92475,
+      "acoustic_db": 69.87618,
+      "pressure_kpa": 409.97736
+    },
+    {
+      "vibration_rms": 4.06279,
+      "temperature_c": 91.93535,
+      "current_a": 104.35045,
+      "speed_rpm": 856.69598,
+      "acoustic_db": 68.28939,
+      "pressure_kpa": 387.18332
+    },
+    {
+      "vibration_rms": 4.53338,
+      "temperature_c": 92.85173,
+      "current_a": 92.72977,
+      "speed_rpm": 811.66079,
+      "acoustic_db": 68.43307,
+      "pressure_kpa": 411.48062
+    },
+    {
+      "vibration_rms": 4.0953,
+      "temperature_c": 80.67311,
+      "current_a": 89.59732,
+      "speed_rpm": 794.6072,
+      "acoustic_db": 68.07212,
+      "pressure_kpa": 417.08864
+    },
+    {
+      "vibration_rms": 4.7204,
+      "temperature_c": 79.76643,
+      "current_a": 92.11849,
+      "speed_rpm": 821.79028,
+      "acoustic_db": 68.86307,
+      "pressure_kpa": 418.14149
+    },
+    {
+      "vibration_rms": 4.42015,
+      "temperature_c": 90.0752,
+      "current_a": 106.1473,
+      "speed_rpm": 856.94718,
+      "acoustic_db": 70.83125,
+      "pressure_kpa": 389.43168
+    },
+    {
+      "vibration_rms": 4.41987,
+      "temperature_c": 93.4428,
+      "current_a": 92.19092,
+      "speed_rpm": 837.243,
+      "acoustic_db": 66.44647,
+      "pressure_kpa": 403.47027
+    },
+    {
+      "vibration_rms": 4.21244,
+      "temperature_c": 82.92634,
+      "current_a": 94.97092,
+      "speed_rpm": 802.69029,
+      "acoustic_db": 68.44028,
+      "pressure_kpa": 411.90032
+    },
+    {
+      "vibration_rms": 4.21405,
+      "temperature_c": 81.59809,
+      "current_a": 94.56928,
+      "speed_rpm": 793.76369,
+      "acoustic_db": 66.3584,
+      "pressure_kpa": 417.37118
+    },
+    {
+      "vibration_rms": 4.39679,
+      "temperature_c": 83.75061,
+      "current_a": 96.26106,
+      "speed_rpm": 793.28864,
+      "acoustic_db": 69.01592,
+      "pressure_kpa": 408.01468
+    },
+    {
+      "vibration_rms": 4.75805,
+      "temperature_c": 91.18524,
+      "current_a": 104.71184,
+      "speed_rpm": 840.21264,
+      "acoustic_db": 70.86237,
+      "pressure_kpa": 399.07643
+    },
+    {
+      "vibration_rms": 4.46309,
+      "temperature_c": 79.47259,
+      "current_a": 93.61834,
+      "speed_rpm": 817.20047,
+      "acoustic_db": 71.79378,
+      "pressure_kpa": 401.45314
+    },
+    {
+      "vibration_rms": 4.29072,
+      "temperature_c": 89.51785,
+      "current_a": 98.9218,
+      "speed_rpm": 793.87032,
+      "acoustic_db": 72.73462,
+      "pressure_kpa": 415.86394
+    },
+    {
+      "vibration_rms": 5.03685,
+      "temperature_c": 91.62129,
+      "current_a": 101.98421,
+      "speed_rpm": 863.35961,
+      "acoustic_db": 72.26746,
+      "pressure_kpa": 397.0855
+    },
+    {
+      "vibration_rms": 5.05505,
+      "temperature_c": 90.92338,
+      "current_a": 101.2869,
+      "speed_rpm": 857.87698,
+      "acoustic_db": 71.0905,
+      "pressure_kpa": 396.31667
+    },
+    {
+      "vibration_rms": 4.72623,
+      "temperature_c": 80.44241,
+      "current_a": 92.22425,
+      "speed_rpm": 811.70907,
+      "acoustic_db": 71.71427,
+      "pressure_kpa": 403.6401
+    },
+    {
+      "vibration_rms": 4.41281,
+      "temperature_c": 95.27697,
+      "current_a": 99.86084,
+      "speed_rpm": 851.04366,
+      "acoustic_db": 67.15879,
+      "pressure_kpa": 398.19058
+    },
+    {
+      "vibration_rms": 5.10398,
+      "temperature_c": 81.2978,
+      "current_a": 93.67782,
+      "speed_rpm": 813.19544,
+      "acoustic_db": 68.18425,
+      "pressure_kpa": 418.70102
+    },
+    {
+      "vibration_rms": 5.20462,
+      "temperature_c": 93.7678,
+      "current_a": 90.40142,
+      "speed_rpm": 813.71767,
+      "acoustic_db": 69.0738,
+      "pressure_kpa": 412.0552
+    },
+    {
+      "vibration_rms": 4.60638,
+      "temperature_c": 94.82885,
+      "current_a": 102.1853,
+      "speed_rpm": 851.72467,
+      "acoustic_db": 66.91325,
+      "pressure_kpa": 400.98795
+    },
+    {
+      "vibration_rms": 5.16453,
+      "temperature_c": 90.05738,
+      "current_a": 102.95141,
+      "speed_rpm": 830.02421,
+      "acoustic_db": 73.25604,
+      "pressure_kpa": 393.26544
+    },
+    {
+      "vibration_rms": 4.53089,
+      "temperature_c": 87.74531,
+      "current_a": 102.96468,
+      "speed_rpm": 814.64782,
+      "acoustic_db": 66.40638,
+      "pressure_kpa": 415.53593
+    },
+    {
+      "vibration_rms": 4.85641,
+      "temperature_c": 92.79601,
+      "current_a": 105.82499,
+      "speed_rpm": 857.93914,
+      "acoustic_db": 71.61988,
+      "pressure_kpa": 390.42923
+    },
+    {
+      "vibration_rms": 5.31949,
+      "temperature_c": 83.65138,
+      "current_a": 92.47706,
+      "speed_rpm": 786.54539,
+      "acoustic_db": 70.47234,
+      "pressure_kpa": 417.90424
+    },
+    {
+      "vibration_rms": 4.9858,
+      "temperature_c": 86.18173,
+      "current_a": 94.80108,
+      "speed_rpm": 791.72869,
+      "acoustic_db": 70.99484,
+      "pressure_kpa": 406.08457
+    },
+    {
+      "vibration_rms": 4.75397,
+      "temperature_c": 81.96023,
+      "current_a": 93.1765,
+      "speed_rpm": 829.52239,
+      "acoustic_db": 73.02968,
+      "pressure_kpa": 400.03501
+    },
+    {
+      "vibration_rms": 5.01829,
+      "temperature_c": 86.1904,
+      "current_a": 95.36919,
+      "speed_rpm": 800.24379,
+      "acoustic_db": 69.64673,
+      "pressure_kpa": 406.19793
+    },
+    {
+      "vibration_rms": 5.1036,
+      "temperature_c": 84.05595,
+      "current_a": 91.90837,
+      "speed_rpm": 791.5516,
+      "acoustic_db": 67.76208,
+      "pressure_kpa": 419.46774
+    },
+    {
+      "vibration_rms": 4.998,
+      "temperature_c": 87.14407,
+      "current_a": 95.85057,
+      "speed_rpm": 801.24704,
+      "acoustic_db": 68.44408,
+      "pressure_kpa": 408.0415
+    },
+    {
+      "vibration_rms": 4.89015,
+      "temperature_c": 84.15267,
+      "current_a": 87.16052,
+      "speed_rpm": 778.06681,
+      "acoustic_db": 68.42576,
+      "pressure_kpa": 418.27314
+    },
+    {
+      "vibration_rms": 4.88785,
+      "temperature_c": 97.24546,
+      "current_a": 99.8814,
+      "speed_rpm": 848.66133,
+      "acoustic_db": 68.0848,
+      "pressure_kpa": 398.83857
+    },
+    {
+      "vibration_rms": 4.80304,
+      "temperature_c": 96.3827,
+      "current_a": 105.96974,
+      "speed_rpm": 858.07244,
+      "acoustic_db": 68.2741,
+      "pressure_kpa": 394.2736
+    },
+    {
+      "vibration_rms": 5.14556,
+      "temperature_c": 87.40205,
+      "current_a": 96.91898,
+      "speed_rpm": 793.80702,
+      "acoustic_db": 70.93642,
+      "pressure_kpa": 402.68594
+    },
+    {
+      "vibration_rms": 5.67696,
+      "temperature_c": 96.59025,
+      "current_a": 89.78754,
+      "speed_rpm": 811.58894,
+      "acoustic_db": 69.46484,
+      "pressure_kpa": 414.5025
+    },
+    {
+      "vibration_rms": 4.9255,
+      "temperature_c": 94.32758,
+      "current_a": 100.79527,
+      "speed_rpm": 857.36847,
+      "acoustic_db": 67.90994,
+      "pressure_kpa": 397.36338
+    },
+    {
+      "vibration_rms": 5.06891,
+      "temperature_c": 96.96908,
+      "current_a": 101.1638,
+      "speed_rpm": 855.68893,
+      "acoustic_db": 67.92056,
+      "pressure_kpa": 398.15778
+    },
+    {
+      "vibration_rms": 5.25262,
+      "temperature_c": 84.90079,
+      "current_a": 100.92692,
+      "speed_rpm": 857.80799,
+      "acoustic_db": 69.20363,
+      "pressure_kpa": 389.24795
+    },
+    {
+      "vibration_rms": 5.67448,
+      "temperature_c": 89.31263,
+      "current_a": 106.09852,
+      "speed_rpm": 858.36236,
+      "acoustic_db": 66.79742,
+      "pressure_kpa": 392.6539
+    },
+    {
+      "vibration_rms": 5.12156,
+      "temperature_c": 86.97308,
+      "current_a": 90.93065,
+      "speed_rpm": 790.95634,
+      "acoustic_db": 69.26727,
+      "pressure_kpa": 411.07751
+    },
+    {
+      "vibration_rms": 5.81235,
+      "temperature_c": 91.53458,
+      "current_a": 102.92678,
+      "speed_rpm": 822.52025,
+      "acoustic_db": 73.76143,
+      "pressure_kpa": 396.50706
+    },
+    {
+      "vibration_rms": 5.43801,
+      "temperature_c": 87.66014,
+      "current_a": 95.90883,
+      "speed_rpm": 791.48533,
+      "acoustic_db": 71.35349,
+      "pressure_kpa": 403.80496
+    },
+    {
+      "vibration_rms": 5.77495,
+      "temperature_c": 93.63721,
+      "current_a": 104.2185,
+      "speed_rpm": 846.3053,
+      "acoustic_db": 74.61641,
+      "pressure_kpa": 390.9169
+    },
+    {
+      "vibration_rms": 5.57155,
+      "temperature_c": 89.27711,
+      "current_a": 98.54494,
+      "speed_rpm": 803.88069,
+      "acoustic_db": 71.00214,
+      "pressure_kpa": 407.53705
+    },
+    {
+      "vibration_rms": 5.88135,
+      "temperature_c": 87.51357,
+      "current_a": 108.37164,
+      "speed_rpm": 854.90507,
+      "acoustic_db": 69.03831,
+      "pressure_kpa": 389.96926
+    },
+    {
+      "vibration_rms": 5.26893,
+      "temperature_c": 93.55349,
+      "current_a": 98.76115,
+      "speed_rpm": 802.95227,
+      "acoustic_db": 72.85317,
+      "pressure_kpa": 411.44417
+    },
+    {
+      "vibration_rms": 5.29981,
+      "temperature_c": 97.08452,
+      "current_a": 101.50121,
+      "speed_rpm": 844.36913,
+      "acoustic_db": 68.8421,
+      "pressure_kpa": 400.56169
+    },
+    {
+      "vibration_rms": 5.95595,
+      "temperature_c": 94.43048,
+      "current_a": 103.68337,
+      "speed_rpm": 845.2462,
+      "acoustic_db": 75.14574,
+      "pressure_kpa": 390.46544
+    },
+    {
+      "vibration_rms": 5.57309,
+      "temperature_c": 89.64831,
+      "current_a": 98.82753,
+      "speed_rpm": 799.63723,
+      "acoustic_db": 70.35329,
+      "pressure_kpa": 408.74064
+    },
+    {
+      "vibration_rms": 5.76578,
+      "temperature_c": 98.88074,
+      "current_a": 97.29764,
+      "speed_rpm": 840.71267,
+      "acoustic_db": 75.21641,
+      "pressure_kpa": 388.10512
+    },
+    {
+      "vibration_rms": 5.58693,
+      "temperature_c": 89.34369,
+      "current_a": 97.55757,
+      "speed_rpm": 792.76598,
+      "acoustic_db": 70.31484,
+      "pressure_kpa": 414.66762
+    },
+    {
+      "vibration_rms": 6.01932,
+      "temperature_c": 94.19035,
+      "current_a": 104.34509,
+      "speed_rpm": 838.37254,
+      "acoustic_db": 74.1849,
+      "pressure_kpa": 391.64514
+    },
+    {
+      "vibration_rms": 5.77471,
+      "temperature_c": 98.30076,
+      "current_a": 97.37256,
+      "speed_rpm": 835.52943,
+      "acoustic_db": 69.58971,
+      "pressure_kpa": 403.44367
+    },
+    {
+      "vibration_rms": 6.01034,
+      "temperature_c": 87.27017,
+      "current_a": 99.08957,
+      "speed_rpm": 845.31625,
+      "acoustic_db": 69.03414,
+      "pressure_kpa": 388.16402
+    },
+    {
+      "vibration_rms": 6.26902,
+      "temperature_c": 99.28395,
+      "current_a": 90.37773,
+      "speed_rpm": 798.93005,
+      "acoustic_db": 72.51463,
+      "pressure_kpa": 414.74256
+    },
+    {
+      "vibration_rms": 5.57147,
+      "temperature_c": 96.14709,
+      "current_a": 95.24046,
+      "speed_rpm": 799.00286,
+      "acoustic_db": 75.08723,
+      "pressure_kpa": 410.72512
+    },
+    {
+      "vibration_rms": 5.69706,
+      "temperature_c": 99.19093,
+      "current_a": 92.40517,
+      "speed_rpm": 827.76448,
+      "acoustic_db": 74.91886,
+      "pressure_kpa": 391.99221
+    },
+    {
+      "vibration_rms": 5.94534,
+      "temperature_c": 100.08859,
+      "current_a": 89.34158,
+      "speed_rpm": 793.28507,
+      "acoustic_db": 73.61119,
+      "pressure_kpa": 417.08317
+    },
+    {
+      "vibration_rms": 5.63665,
+      "temperature_c": 95.06375,
+      "current_a": 94.30556,
+      "speed_rpm": 800.95465,
+      "acoustic_db": 74.3469,
+      "pressure_kpa": 413.10965
+    },
+    {
+      "vibration_rms": 6.12509,
+      "temperature_c": 89.84747,
+      "current_a": 90.95031,
+      "speed_rpm": 793.08316,
+      "acoustic_db": 72.75556,
+      "pressure_kpa": 419.18209
+    }
+  ],
+  "condition_label": "fault",
+  "anomaly_intervals": [
+    {
+      "type": "fault_development",
+      "start": 470,
+      "end": 607
+    }
+  ]
+}

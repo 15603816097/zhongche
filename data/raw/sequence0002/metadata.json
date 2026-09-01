@@ -1,0 +1,11 @@
+{
+  "unique_id": "T3_SAMPLE_0002",
+  "data_source": "public_sample_synthetic",
+  "generation_method": "physics-inspired time-series synthesis, independent from hidden test data",
+  "difficulty": "medium",
+  "scene": "rail_transit_equipment_operation_sample",
+  "device": "gearbox",
+  "capture_time": "2026-07-01T13:00:00",
+  "condition": "degradation",
+  "sampling_interval_seconds": 1
+}

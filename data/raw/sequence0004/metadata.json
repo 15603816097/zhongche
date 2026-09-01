@@ -1,0 +1,11 @@
+{
+  "unique_id": "T3_SAMPLE_0004",
+  "data_source": "public_sample_synthetic",
+  "generation_method": "physics-inspired time-series synthesis, independent from hidden test data",
+  "difficulty": "medium",
+  "scene": "rail_transit_equipment_operation_sample",
+  "device": "compressor",
+  "capture_time": "2026-07-01T15:00:00",
+  "condition": "condition_switch",
+  "sampling_interval_seconds": 1
+}

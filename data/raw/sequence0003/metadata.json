@@ -1,0 +1,11 @@
+{
+  "unique_id": "T3_SAMPLE_0003",
+  "data_source": "public_sample_synthetic",
+  "generation_method": "physics-inspired time-series synthesis, independent from hidden test data",
+  "difficulty": "medium",
+  "scene": "rail_transit_equipment_operation_sample",
+  "device": "bearing_box",
+  "capture_time": "2026-07-01T14:00:00",
+  "condition": "fault",
+  "sampling_interval_seconds": 1
+}
