@@ -19,7 +19,7 @@ API_KEY = os.getenv("API_KEY", "").strip()
 CALLBACK_TIMEOUT = float(os.getenv("CALLBACK_TIMEOUT", "10"))
 CALLBACK_RETRIES = int(os.getenv("CALLBACK_RETRIES", "3"))
 
-app = FastAPI(title=APP_NAME, version="2.1.0")
+app = FastAPI(title=APP_NAME, version="2.2.0")
 
 
 def ok(body: Dict[str, Any]) -> JSONResponse:
@@ -199,12 +199,14 @@ def build_callback_payload(
     predictions: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """
-    官网回调接口实际要求 body 中存在 results 字段。
+    官网真实回调接口要求 results 为 list。
 
-    results 内部放置与同步响应一致的业务结果；同时保留顶层 code/message/
-    predictions，兼容 V1.0 文档中较宽泛的“业务结果”描述以及可能的旧接口。
+    单样本异步回调仍使用长度为 1 的 results 列表；列表元素携带
+    requestId、code、message 和本题 predictions。
+    顶层保留 requestId/code/message/predictions 作为兼容字段。
     """
-    results = {
+    one_result = {
+        "requestId": request_id,
         "code": int(code),
         "message": str(message),
         "predictions": predictions,
@@ -213,8 +215,7 @@ def build_callback_payload(
     return {
         "requestId": request_id,
         "callback_token": callback_token,
-        "results": results,
-        # 兼容字段：平台若忽略额外字段不会影响 results 解析
+        "results": [one_result],
         "code": int(code),
         "message": str(message),
         "predictions": predictions,
@@ -264,7 +265,7 @@ def root():
 def health():
     return {
         "status": "ok",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "lookback": LOOKBACK,
         "forecast_horizon": HORIZON,
         "target_columns": TARGET_COLUMNS,
@@ -282,7 +283,6 @@ def predict(
         return auth_error
 
     try:
-        # 当前官网联调保持 batch_size=1，避免切换到批量请求结构。
         if payload.get("batch") is True:
             return fail("当前联调版本要求 batch_size=1")
 
@@ -303,7 +303,6 @@ def predict(
                 callback_payload,
             )
 
-        # 单条同步响应严格保持官方预测响应格式。
         return ok(
             {
                 "code": 0,
