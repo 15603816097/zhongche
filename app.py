@@ -18,26 +18,32 @@ from src.inference import predict_future
 APP_NAME = "Rail Transit Time-Series Forecast API"
 API_KEY = os.getenv("API_KEY", "").strip()
 
-# 官网异步评测参数。
-# callback 协议格式已经通过官网真实接口验证，后续不再改变。
+# Callback 协议格式已经通过官网真实接口验证，固定不再改变。
 CALLBACK_TIMEOUT = float(os.getenv("CALLBACK_TIMEOUT", "20"))
 CALLBACK_RETRIES = int(os.getenv("CALLBACK_RETRIES", "5"))
-CALLBACK_WORKERS = max(1, int(os.getenv("CALLBACK_WORKERS", "8")))
 
-# 官方规范要求：选手 API 先完成 HTTP 200 应答，再回调 callback_url。
-# 之前 submit_callback() 在 /predict return 之前就把任务交给线程池，
-# 存在 callback 比 /predict 响应更早到达平台的竞争条件。
-# 这里增加一个很短的首发延迟，确保平台先完成原请求登记。
-CALLBACK_INITIAL_DELAY = max(
-    0.0, float(os.getenv("CALLBACK_INITIAL_DELAY", "2.0"))
+# 关键：官网 callback 接口在并发写入时会出现 pending 计数不下降的现象。
+# 因此回调严格串行发送，避免多个 callback 同时到达平台官网。
+CALLBACK_WORKERS = 1
+
+# 每个回调至少在对应 /predict 请求入队这么久之后再发送，
+# 保证官网先完成原请求登记。使用“最小年龄”而不是每条固定 sleep，
+# 因此排队中的后续回调不会重复等待 1 秒。
+CALLBACK_MIN_AGE = max(
+    0.0, float(os.getenv("CALLBACK_MIN_AGE", "1.0"))
+)
+
+# 两次 callback POST 之间保留一个很小的间隔，进一步避免官网后端写入竞争。
+CALLBACK_GAP = max(
+    0.0, float(os.getenv("CALLBACK_GAP", "0.25"))
 )
 
 CALLBACK_EXECUTOR = ThreadPoolExecutor(
     max_workers=CALLBACK_WORKERS,
-    thread_name_prefix="evaluation-callback",
+    thread_name_prefix="evaluation-callback-serial",
 )
 
-app = FastAPI(title=APP_NAME, version="2.5.0")
+app = FastAPI(title=APP_NAME, version="2.6.0")
 
 
 def ok(body: Dict[str, Any]) -> JSONResponse:
@@ -217,12 +223,23 @@ def build_callback_payload(
     predictions: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """
-    已通过官网真实接口验证的 callback 格式。
+    已通过官网真实接口验证的 callback 格式，后续固定保持：
 
-    固定保持：
-    results 必须是 list；
-    results[0] 必须包含 request_id 和 data；
-    data 内为 code/message/predictions。
+    {
+        "callback_token": "...",
+        "results": [
+            {
+                "request_id": "...",
+                "data": {
+                    "code": 0,
+                    "message": "success",
+                    "predictions": [...]
+                }
+            }
+        ]
+    }
+
+    顶层兼容字段继续保留，因为官网已经验证可接受。
     """
     business_data = {
         "code": int(code),
@@ -245,12 +262,18 @@ def build_callback_payload(
     }
 
 
-def send_callback(callback_url: str, body: Dict[str, Any]) -> None:
+def send_callback(
+    callback_url: str,
+    body: Dict[str, Any],
+    queued_at: float,
+) -> None:
     request_id = str(body.get("requestId", "") or "")
 
-    # 只在第一次发送前等待一次，保证 /predict 的 200 响应先到平台。
-    if CALLBACK_INITIAL_DELAY > 0:
-        time.sleep(CALLBACK_INITIAL_DELAY)
+    # 只保证“入队后至少等待 CALLBACK_MIN_AGE”，不是每条固定等待。
+    age = time.monotonic() - queued_at
+    wait_seconds = max(0.0, CALLBACK_MIN_AGE - age)
+    if wait_seconds > 0:
+        time.sleep(wait_seconds)
 
     for attempt in range(1, CALLBACK_RETRIES + 1):
         try:
@@ -272,6 +295,8 @@ def send_callback(callback_url: str, body: Dict[str, Any]) -> None:
                     f"status={resp.status_code} attempt={attempt} "
                     f"response={response_text!r}"
                 )
+                if CALLBACK_GAP > 0:
+                    time.sleep(CALLBACK_GAP)
                 return
 
             error = f"HTTP {resp.status_code}: {response_text}"
@@ -287,15 +312,24 @@ def send_callback(callback_url: str, body: Dict[str, Any]) -> None:
             time.sleep(min(0.5 * attempt, 2.0))
 
     print(f"[CALLBACK FAILED] requestId={request_id}")
+    if CALLBACK_GAP > 0:
+        time.sleep(CALLBACK_GAP)
 
 
 def submit_callback(callback_url: str, body: Dict[str, Any]) -> None:
     request_id = str(body.get("requestId", "") or "")
+    queued_at = time.monotonic()
     try:
-        CALLBACK_EXECUTOR.submit(send_callback, callback_url, body)
+        CALLBACK_EXECUTOR.submit(
+            send_callback,
+            callback_url,
+            body,
+            queued_at,
+        )
         print(
             f"[CALLBACK QUEUED] requestId={request_id} "
-            f"delay={CALLBACK_INITIAL_DELAY:.1f}s"
+            f"serial=true min_age={CALLBACK_MIN_AGE:.2f}s "
+            f"gap={CALLBACK_GAP:.2f}s"
         )
     except Exception as exc:
         print(f"[CALLBACK QUEUE FAILED] requestId={request_id}: {exc!r}")
@@ -314,14 +348,16 @@ def root():
 def health():
     return {
         "status": "ok",
-        "version": "2.5.0",
+        "version": "2.6.0",
         "lookback": LOOKBACK,
         "forecast_horizon": HORIZON,
         "target_columns": TARGET_COLUMNS,
         "callback_timeout": CALLBACK_TIMEOUT,
         "callback_retries": CALLBACK_RETRIES,
         "callback_workers": CALLBACK_WORKERS,
-        "callback_initial_delay": CALLBACK_INITIAL_DELAY,
+        "callback_serial": True,
+        "callback_min_age": CALLBACK_MIN_AGE,
+        "callback_gap": CALLBACK_GAP,
     }
 
 
