@@ -19,7 +19,7 @@ API_KEY = os.getenv("API_KEY", "").strip()
 CALLBACK_TIMEOUT = float(os.getenv("CALLBACK_TIMEOUT", "10"))
 CALLBACK_RETRIES = int(os.getenv("CALLBACK_RETRIES", "3"))
 
-app = FastAPI(title=APP_NAME, version="2.2.0")
+app = FastAPI(title=APP_NAME, version="2.3.0")
 
 
 def ok(body: Dict[str, Any]) -> JSONResponse:
@@ -199,14 +199,14 @@ def build_callback_payload(
     predictions: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """
-    官网真实回调接口要求 results 为 list。
+    按官网真实校验错误构造回调：
 
-    单样本异步回调仍使用长度为 1 的 results 列表；列表元素携带
-    requestId、code、message 和本题 predictions。
-    顶层保留 requestId/code/message/predictions 作为兼容字段。
+    results 必须是 list；
+    results[0] 必须包含 request_id 和 data。
+
+    data 中放置与单条同步响应一致的业务结果。
     """
-    one_result = {
-        "requestId": request_id,
+    business_data = {
         "code": int(code),
         "message": str(message),
         "predictions": predictions,
@@ -215,7 +215,13 @@ def build_callback_payload(
     return {
         "requestId": request_id,
         "callback_token": callback_token,
-        "results": [one_result],
+        "results": [
+            {
+                "request_id": request_id,
+                "data": business_data,
+            }
+        ],
+        # 兼容字段；若平台忽略额外字段不会影响主 schema
         "code": int(code),
         "message": str(message),
         "predictions": predictions,
@@ -265,7 +271,7 @@ def root():
 def health():
     return {
         "status": "ok",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "lookback": LOOKBACK,
         "forecast_horizon": HORIZON,
         "target_columns": TARGET_COLUMNS,
