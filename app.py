@@ -19,7 +19,7 @@ API_KEY = os.getenv("API_KEY", "").strip()
 CALLBACK_TIMEOUT = float(os.getenv("CALLBACK_TIMEOUT", "10"))
 CALLBACK_RETRIES = int(os.getenv("CALLBACK_RETRIES", "3"))
 
-app = FastAPI(title=APP_NAME, version="2.0.0")
+app = FastAPI(title=APP_NAME, version="2.1.0")
 
 
 def ok(body: Dict[str, Any]) -> JSONResponse:
@@ -191,7 +191,38 @@ def run_one(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def build_callback_payload(
+    request_id: str,
+    callback_token: Any,
+    code: int,
+    message: str,
+    predictions: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    官网回调接口实际要求 body 中存在 results 字段。
+
+    results 内部放置与同步响应一致的业务结果；同时保留顶层 code/message/
+    predictions，兼容 V1.0 文档中较宽泛的“业务结果”描述以及可能的旧接口。
+    """
+    results = {
+        "code": int(code),
+        "message": str(message),
+        "predictions": predictions,
+    }
+
+    return {
+        "requestId": request_id,
+        "callback_token": callback_token,
+        "results": results,
+        # 兼容字段：平台若忽略额外字段不会影响 results 解析
+        "code": int(code),
+        "message": str(message),
+        "predictions": predictions,
+    }
+
+
 def send_callback(callback_url: str, body: Dict[str, Any]) -> None:
+    request_id = body.get("requestId")
     for attempt in range(1, CALLBACK_RETRIES + 1):
         try:
             resp = requests.post(
@@ -202,22 +233,22 @@ def send_callback(callback_url: str, body: Dict[str, Any]) -> None:
             )
             if 200 <= resp.status_code < 300:
                 print(
-                    f"[CALLBACK OK] requestId={body.get('requestId')} "
+                    f"[CALLBACK OK] requestId={request_id} "
                     f"status={resp.status_code}"
                 )
                 return
-            error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+            error = f"HTTP {resp.status_code}: {resp.text[:500]}"
         except Exception as exc:
             error = repr(exc)
 
         print(
-            f"[CALLBACK RETRY] requestId={body.get('requestId')} "
+            f"[CALLBACK RETRY] requestId={request_id} "
             f"{attempt}/{CALLBACK_RETRIES}: {error}"
         )
         if attempt < CALLBACK_RETRIES:
             time.sleep(attempt)
 
-    print(f"[CALLBACK FAILED] requestId={body.get('requestId')}")
+    print(f"[CALLBACK FAILED] requestId={request_id}")
 
 
 @app.get("/")
@@ -233,6 +264,7 @@ def root():
 def health():
     return {
         "status": "ok",
+        "version": "2.1.0",
         "lookback": LOOKBACK,
         "forecast_horizon": HORIZON,
         "target_columns": TARGET_COLUMNS,
@@ -250,7 +282,7 @@ def predict(
         return auth_error
 
     try:
-        # 首次官网联调请把 batch_size 设置为 1。
+        # 当前官网联调保持 batch_size=1，避免切换到批量请求结构。
         if payload.get("batch") is True:
             return fail("当前联调版本要求 batch_size=1")
 
@@ -258,19 +290,20 @@ def predict(
 
         callback_url = str(payload.get("callback_url", "") or "")
         if callback_url:
+            callback_payload = build_callback_payload(
+                request_id=result["requestId"],
+                callback_token=payload.get("callback_token"),
+                code=0,
+                message="success",
+                predictions=result["predictions"],
+            )
             background_tasks.add_task(
                 send_callback,
                 callback_url,
-                {
-                    "requestId": result["requestId"],
-                    "callback_token": payload.get("callback_token"),
-                    "code": 0,
-                    "message": "success",
-                    "predictions": result["predictions"],
-                },
+                callback_payload,
             )
 
-        # 单条同步响应严格按官方示例
+        # 单条同步响应严格保持官方预测响应格式。
         return ok(
             {
                 "code": 0,
@@ -286,16 +319,17 @@ def predict(
 
         callback_url = str(payload.get("callback_url", "") or "")
         if callback_url and request_id:
+            callback_payload = build_callback_payload(
+                request_id=request_id,
+                callback_token=payload.get("callback_token"),
+                code=-1,
+                message=str(exc),
+                predictions=[],
+            )
             background_tasks.add_task(
                 send_callback,
                 callback_url,
-                {
-                    "requestId": request_id,
-                    "callback_token": payload.get("callback_token"),
-                    "code": -1,
-                    "message": str(exc),
-                    "predictions": [],
-                },
+                callback_payload,
             )
 
         return fail(str(exc))
