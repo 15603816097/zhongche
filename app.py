@@ -18,18 +18,26 @@ from src.inference import predict_future
 APP_NAME = "Rail Transit Time-Series Forecast API"
 API_KEY = os.getenv("API_KEY", "").strip()
 
-# 官网 50 样本评测时 callback 接收端可能出现瞬时拥塞。
-# 不再使用 FastAPI/Starlette 的 BackgroundTasks 公共线程池，
-# 避免 callback 阻塞与 /predict 请求争抢同一个线程池。
+# 官网异步评测参数。
+# callback 协议格式已经通过官网真实接口验证，后续不再改变。
 CALLBACK_TIMEOUT = float(os.getenv("CALLBACK_TIMEOUT", "20"))
 CALLBACK_RETRIES = int(os.getenv("CALLBACK_RETRIES", "5"))
 CALLBACK_WORKERS = max(1, int(os.getenv("CALLBACK_WORKERS", "8")))
+
+# 官方规范要求：选手 API 先完成 HTTP 200 应答，再回调 callback_url。
+# 之前 submit_callback() 在 /predict return 之前就把任务交给线程池，
+# 存在 callback 比 /predict 响应更早到达平台的竞争条件。
+# 这里增加一个很短的首发延迟，确保平台先完成原请求登记。
+CALLBACK_INITIAL_DELAY = max(
+    0.0, float(os.getenv("CALLBACK_INITIAL_DELAY", "2.0"))
+)
+
 CALLBACK_EXECUTOR = ThreadPoolExecutor(
     max_workers=CALLBACK_WORKERS,
     thread_name_prefix="evaluation-callback",
 )
 
-app = FastAPI(title=APP_NAME, version="2.4.0")
+app = FastAPI(title=APP_NAME, version="2.5.0")
 
 
 def ok(body: Dict[str, Any]) -> JSONResponse:
@@ -215,8 +223,6 @@ def build_callback_payload(
     results 必须是 list；
     results[0] 必须包含 request_id 和 data；
     data 内为 code/message/predictions。
-
-    后续只优化 callback 传输可靠性，不改变该协议结构。
     """
     business_data = {
         "code": int(code),
@@ -242,6 +248,10 @@ def build_callback_payload(
 def send_callback(callback_url: str, body: Dict[str, Any]) -> None:
     request_id = str(body.get("requestId", "") or "")
 
+    # 只在第一次发送前等待一次，保证 /predict 的 200 响应先到平台。
+    if CALLBACK_INITIAL_DELAY > 0:
+        time.sleep(CALLBACK_INITIAL_DELAY)
+
     for attempt in range(1, CALLBACK_RETRIES + 1):
         try:
             resp = requests.post(
@@ -251,19 +261,20 @@ def send_callback(callback_url: str, body: Dict[str, Any]) -> None:
                     "Content-Type": "application/json",
                     "Connection": "close",
                 },
-                # connect timeout 与 read timeout 分开，避免官网 callback
-                # 在高并发评测时偶发 10 秒以上响应导致过早失败。
                 timeout=(5.0, CALLBACK_TIMEOUT),
             )
+
+            response_text = (resp.text or "").replace("\n", " ")[:500]
 
             if 200 <= resp.status_code < 300:
                 print(
                     f"[CALLBACK OK] requestId={request_id} "
-                    f"status={resp.status_code} attempt={attempt}"
+                    f"status={resp.status_code} attempt={attempt} "
+                    f"response={response_text!r}"
                 )
                 return
 
-            error = f"HTTP {resp.status_code}: {resp.text[:500]}"
+            error = f"HTTP {resp.status_code}: {response_text}"
         except Exception as exc:
             error = repr(exc)
 
@@ -273,8 +284,6 @@ def send_callback(callback_url: str, body: Dict[str, Any]) -> None:
         )
 
         if attempt < CALLBACK_RETRIES:
-            # 短退避，既不给官网 callback 接口造成瞬时重试洪峰，
-            # 又避免整批评测等待过久。
             time.sleep(min(0.5 * attempt, 2.0))
 
     print(f"[CALLBACK FAILED] requestId={request_id}")
@@ -284,7 +293,10 @@ def submit_callback(callback_url: str, body: Dict[str, Any]) -> None:
     request_id = str(body.get("requestId", "") or "")
     try:
         CALLBACK_EXECUTOR.submit(send_callback, callback_url, body)
-        print(f"[CALLBACK QUEUED] requestId={request_id}")
+        print(
+            f"[CALLBACK QUEUED] requestId={request_id} "
+            f"delay={CALLBACK_INITIAL_DELAY:.1f}s"
+        )
     except Exception as exc:
         print(f"[CALLBACK QUEUE FAILED] requestId={request_id}: {exc!r}")
 
@@ -302,13 +314,14 @@ def root():
 def health():
     return {
         "status": "ok",
-        "version": "2.4.0",
+        "version": "2.5.0",
         "lookback": LOOKBACK,
         "forecast_horizon": HORIZON,
         "target_columns": TARGET_COLUMNS,
         "callback_timeout": CALLBACK_TIMEOUT,
         "callback_retries": CALLBACK_RETRIES,
         "callback_workers": CALLBACK_WORKERS,
+        "callback_initial_delay": CALLBACK_INITIAL_DELAY,
     }
 
 
