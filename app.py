@@ -1,197 +1,313 @@
 # app.py
-import sys
+import io
 import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-import pandas as pd
-import numpy as np
-import requests
-import json
+import time
 import traceback
-from fastapi import FastAPI, HTTPException, Request
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+import pandas as pd
+import requests
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse
-from typing import List, Dict, Any, Optional
-from pydantic import BaseModel
 
+from config import HORIZON, LOOKBACK, TARGET_COLUMNS
 from src.inference import predict_future
-from config import TARGET_COLUMNS
 
-app = FastAPI(title="轨道交通时序预测API")
+APP_NAME = "Rail Transit Time-Series Forecast API"
+API_KEY = os.getenv("API_KEY", "").strip()
+CALLBACK_TIMEOUT = float(os.getenv("CALLBACK_TIMEOUT", "10"))
+CALLBACK_RETRIES = int(os.getenv("CALLBACK_RETRIES", "3"))
 
-
-# ========== 请求模型 ==========
-class HistoryItem(BaseModel):
-    step: int
-    timestamp: str
-    values: Dict[str, float]
-
-class PredictRequest(BaseModel):
-    requestId: str
-    model: str
-    history_url: str
-    history_length: int
-    forecast_horizon: int
-    sampling_interval_seconds: int
-    target_columns: List[str]
-    history: List[Dict[str, Any]]  # 可以是多种格式
-    callback_url: Optional[str] = None
-    callback_token: Optional[str] = None
+app = FastAPI(title=APP_NAME, version="2.0.0")
 
 
-# ========== 核心推理函数 ==========
-def run_inference(history_data: List[Dict], forecast_horizon: int, target_cols: List[str]) -> List[Dict]:
-    """
-    执行推理，返回符合官方格式的 predictions 数组
-    """
-    # 1. 解析 history 数据
-    rows = []
-    for item in history_data:
-        # 格式1：{"step": 0, "timestamp": "...", "values": {"vibration_rms": 1.2, ...}}
-        if isinstance(item, dict):
-            if "values" in item and isinstance(item["values"], dict):
-                vals = item["values"]
-                row = {}
-                for col in target_cols:
-                    val = vals.get(col, 0.0)
-                    if val is None:
-                        val = 0.0
-                    row[col] = float(val)
-                rows.append(row)
-            elif "step" in item and "timestamp" in item:
-                # 格式2：{"step": 0, "timestamp": "...", "vibration_rms": 1.2, ...}
-                row = {}
-                for col in target_cols:
-                    val = item.get(col, 0.0)
-                    if val is None:
-                        val = 0.0
-                    row[col] = float(val)
-                rows.append(row)
-            else:
-                raise ValueError(f"未知的 history 格式: {item}")
-        elif isinstance(item, list):
-            # 格式3：[v1, v2, v3, ...]
-            row = {}
-            for i, col in enumerate(target_cols):
-                val = item[i] if i < len(item) else 0.0
-                if val is None:
-                    val = 0.0
-                row[col] = float(val)
-            rows.append(row)
-        else:
-            raise ValueError(f"未知的 history 类型: {type(item)}")
-
-    history_df = pd.DataFrame(rows)
-
-    # 按 step 排序（如果有 step 列）
-    if "step" in history_df.columns:
-        history_df = history_df.sort_values("step")
-
-    print(f"📊 转换后 DataFrame shape: {history_df.shape}")
-
-    # 2. 调用真正的推理函数
-    pred_array = predict_future(history_df)  # shape: (96, 6)
-
-    # 3. 修复非法数值（NaN, Inf）
-    pred_array = np.nan_to_num(pred_array, nan=0.0, posinf=9999.0, neginf=-9999.0)
-
-    # 4. 构建预测结果的索引映射
-    col_index = {name: i for i, name in enumerate(TARGET_COLUMNS)}
-    ordered_indices = [col_index[col] for col in target_cols if col in col_index]
-    if not ordered_indices:
-        ordered_indices = list(range(len(target_cols)))
-
-    # 5. 生成 predictions 数组（官方格式）
-    predictions = []
-    for step in range(forecast_horizon):
-        step_values = {}
-        for idx, col in enumerate(target_cols):
-            if idx < len(ordered_indices) and ordered_indices[idx] < len(pred_array[step]):
-                step_values[col] = float(pred_array[step][ordered_indices[idx]])
-            else:
-                step_values[col] = 0.0
-        predictions.append({
-            "step": step,
-            "values": step_values
-        })
-
-    return predictions
+def ok(body: Dict[str, Any]) -> JSONResponse:
+    return JSONResponse(status_code=200, content=body)
 
 
-# ========== 核心 API 端点 ==========
-@app.post("/predict")
-async def predict(req: PredictRequest):
-    print(f"📨 收到请求，字段: {list(req.model_dump().keys())}")
-    print(f"📊 收到 {len(req.history)} 步历史数据")
+def fail(message: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=200,
+        content={"code": -1, "message": str(message), "predictions": []},
+    )
 
-    try:
-        # 1. 执行推理
-        predictions = run_inference(
-            history_data=req.history,
-            forecast_horizon=req.forecast_horizon,
-            target_cols=req.target_columns
-        )
 
-        # 2. 构造响应体（官方格式）
-        response_body = {
-            "code": 0,
-            "message": "success",
-            "predictions": predictions
-        }
-
-        # 3. 如果有回调地址，异步发送回调
-        if req.callback_url:
-            # 回调 payload：必须包含 callback_token 和业务结果
-            callback_payload = {
-                "callback_token": req.callback_token,
-                "code": 0,
-                "message": "success",
-                "predictions": predictions
-            }
-            print(f"📤 发送回调到: {req.callback_url}")
-
-            try:
-                # 添加必要的请求头
-                headers = {"Content-Type": "application/json"}
-                # 如果有 Authorization token（平台可能要求）
-                # if req.callback_token:
-                #     headers["Authorization"] = f"Bearer {req.callback_token}"
-
-                resp = requests.post(
-                    req.callback_url,
-                    json=callback_payload,
-                    timeout=12,
-                    headers=headers
-                )
-                print(f"✅ 回调响应: status={resp.status_code}, body={resp.text[:300]}")
-            except requests.exceptions.Timeout:
-                print("❌ 回调超时")
-            except requests.exceptions.ConnectionError:
-                print("❌ 回调连接失败（可能是本地测试环境）")
-            except Exception as e:
-                print(f"❌ 回调异常: {str(e)}")
-
-        # 4. 同步返回结果（平台优先读取同步响应）
-        return JSONResponse(content=response_body)
-
-    except Exception as e:
-        print(f"❌ 推理失败: {str(e)}")
-        traceback.print_exc()
-        # 返回错误格式（code 非 0）
+def check_api_key(request: Request) -> Optional[JSONResponse]:
+    if not API_KEY:
+        return None
+    if request.headers.get("Authorization", "") != f"Bearer {API_KEY}":
         return JSONResponse(
-            status_code=200,
-            content={
-                "code": -1,
-                "message": str(e),
-                "predictions": []
-            }
+            status_code=401,
+            content={"code": -1, "message": "unauthorized", "predictions": []},
         )
+    return None
+
+
+def safe_float(value: Any) -> float:
+    if value is None or value == "":
+        return np.nan
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return np.nan
+    return value if np.isfinite(value) else np.nan
+
+
+def download_history(history_url: str, target_cols: List[str]) -> List[Dict[str, Any]]:
+    if not history_url:
+        raise ValueError("history 为空，同时 history_url 也为空")
+
+    resp = requests.get(history_url, timeout=15)
+    resp.raise_for_status()
+    df = pd.read_csv(io.StringIO(resp.text))
+
+    missing = [c for c in target_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"history_url CSV 缺少字段: {missing}")
+
+    return [
+        {
+            "step": step,
+            "values": {c: safe_float(row[c]) for c in target_cols},
+        }
+        for step, (_, row) in enumerate(df.iterrows())
+    ]
+
+
+def history_to_df(history: Any, history_url: str, target_cols: List[str]) -> pd.DataFrame:
+    if not history:
+        history = download_history(history_url, target_cols)
+
+    if not isinstance(history, list):
+        raise ValueError("history 必须是数组")
+
+    if history and all(isinstance(x, dict) and "step" in x for x in history):
+        history = sorted(history, key=lambda x: int(x["step"]))
+
+    rows = []
+    for item in history:
+        if isinstance(item, dict):
+            source = item["values"] if isinstance(item.get("values"), dict) else item
+            rows.append({c: safe_float(source.get(c)) for c in target_cols})
+        elif isinstance(item, (list, tuple)):
+            rows.append(
+                {
+                    c: safe_float(item[i]) if i < len(item) else np.nan
+                    for i, c in enumerate(target_cols)
+                }
+            )
+        else:
+            raise ValueError(f"history 数据类型不支持: {type(item).__name__}")
+
+    if not rows:
+        raise ValueError("history 没有有效数据")
+
+    df = pd.DataFrame(rows, columns=target_cols).reindex(columns=TARGET_COLUMNS)
+
+    if len(df) < LOOKBACK:
+        raise ValueError(f"历史数据不足: 实际 {len(df)}，至少需要 {LOOKBACK}")
+
+    return df
+
+
+def validate_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    request_id = str(payload.get("requestId", "")).strip()
+    if not request_id:
+        raise ValueError("缺少 requestId")
+
+    horizon = int(payload.get("forecast_horizon", HORIZON))
+    if horizon != HORIZON:
+        raise ValueError(f"forecast_horizon 必须为 {HORIZON}，实际为 {horizon}")
+
+    target_cols = payload.get("target_columns", TARGET_COLUMNS)
+    if not isinstance(target_cols, list):
+        raise ValueError("target_columns 必须是数组")
+
+    if len(target_cols) != len(TARGET_COLUMNS) or set(target_cols) != set(TARGET_COLUMNS):
+        raise ValueError(f"target_columns 必须完整包含: {TARGET_COLUMNS}")
+
+    return {
+        "request_id": request_id,
+        "target_cols": target_cols,
+        "history_length": int(payload.get("history_length", 512)),
+    }
+
+
+def repair_pred(pred: np.ndarray, history_df: pd.DataFrame) -> np.ndarray:
+    pred = np.asarray(pred, dtype=np.float64)
+    expected = (HORIZON, len(TARGET_COLUMNS))
+
+    if pred.shape != expected:
+        raise ValueError(f"模型输出 shape 错误: 实际 {pred.shape}，要求 {expected}")
+
+    last_values = history_df[TARGET_COLUMNS].iloc[-1].to_numpy(dtype=np.float64)
+    for j in range(pred.shape[1]):
+        bad = ~np.isfinite(pred[:, j])
+        if np.any(bad):
+            fallback = last_values[j] if np.isfinite(last_values[j]) else 0.0
+            pred[bad, j] = fallback
+
+    return pred
+
+
+def build_predictions(pred: np.ndarray, target_cols: List[str]) -> List[Dict[str, Any]]:
+    col_index = {name: i for i, name in enumerate(TARGET_COLUMNS)}
+    return [
+        {
+            "step": step,
+            "values": {
+                col: float(pred[step, col_index[col]])
+                for col in target_cols
+            },
+        }
+        for step in range(HORIZON)
+    ]
+
+
+def run_one(payload: Dict[str, Any]) -> Dict[str, Any]:
+    meta = validate_payload(payload)
+
+    history_df = history_to_df(
+        payload.get("history", []),
+        str(payload.get("history_url", "") or ""),
+        meta["target_cols"],
+    )
+
+    if len(history_df) != meta["history_length"]:
+        print(
+            f"[WARN] requestId={meta['request_id']} "
+            f"history_length={meta['history_length']} actual={len(history_df)}"
+        )
+
+    pred = repair_pred(predict_future(history_df), history_df)
+    predictions = build_predictions(pred, meta["target_cols"])
+
+    return {
+        "requestId": meta["request_id"],
+        "code": 0,
+        "message": "success",
+        "predictions": predictions,
+    }
+
+
+def send_callback(callback_url: str, body: Dict[str, Any]) -> None:
+    for attempt in range(1, CALLBACK_RETRIES + 1):
+        try:
+            resp = requests.post(
+                callback_url,
+                json=body,
+                headers={"Content-Type": "application/json"},
+                timeout=CALLBACK_TIMEOUT,
+            )
+            if 200 <= resp.status_code < 300:
+                print(
+                    f"[CALLBACK OK] requestId={body.get('requestId')} "
+                    f"status={resp.status_code}"
+                )
+                return
+            error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+        except Exception as exc:
+            error = repr(exc)
+
+        print(
+            f"[CALLBACK RETRY] requestId={body.get('requestId')} "
+            f"{attempt}/{CALLBACK_RETRIES}: {error}"
+        )
+        if attempt < CALLBACK_RETRIES:
+            time.sleep(attempt)
+
+    print(f"[CALLBACK FAILED] requestId={body.get('requestId')}")
+
+
+@app.get("/")
+def root():
+    return {
+        "service": APP_NAME,
+        "status": "ok",
+        "predict_endpoint": "/predict",
+    }
 
 
 @app.get("/health")
-async def health():
-    return {"status": "ok"}
+def health():
+    return {
+        "status": "ok",
+        "lookback": LOOKBACK,
+        "forecast_horizon": HORIZON,
+        "target_columns": TARGET_COLUMNS,
+    }
+
+
+@app.post("/predict")
+def predict(
+    payload: Dict[str, Any],
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    auth_error = check_api_key(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        # 首次官网联调请把 batch_size 设置为 1。
+        if payload.get("batch") is True:
+            return fail("当前联调版本要求 batch_size=1")
+
+        result = run_one(payload)
+
+        callback_url = str(payload.get("callback_url", "") or "")
+        if callback_url:
+            background_tasks.add_task(
+                send_callback,
+                callback_url,
+                {
+                    "requestId": result["requestId"],
+                    "callback_token": payload.get("callback_token"),
+                    "code": 0,
+                    "message": "success",
+                    "predictions": result["predictions"],
+                },
+            )
+
+        # 单条同步响应严格按官方示例
+        return ok(
+            {
+                "code": 0,
+                "message": "success",
+                "predictions": result["predictions"],
+            }
+        )
+
+    except Exception as exc:
+        request_id = str(payload.get("requestId", "") or "")
+        print(f"[PREDICT ERROR] requestId={request_id}: {exc}")
+        traceback.print_exc()
+
+        callback_url = str(payload.get("callback_url", "") or "")
+        if callback_url and request_id:
+            background_tasks.add_task(
+                send_callback,
+                callback_url,
+                {
+                    "requestId": request_id,
+                    "callback_token": payload.get("callback_token"),
+                    "code": -1,
+                    "message": str(exc),
+                    "predictions": [],
+                },
+            )
+
+        return fail(str(exc))
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8800)
+
+    uvicorn.run(
+        "app:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8800")),
+        workers=1,
+        log_level="info",
+    )
