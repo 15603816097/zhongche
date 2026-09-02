@@ -13,9 +13,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from config import HORIZON, LOOKBACK, TARGET_COLUMNS
-from src.inference import predict_future
+from src.inference import load_models, predict_future
 
 APP_NAME = "Rail Transit Time-Series Forecast API"
+APP_VERSION = "2.7.0"
 API_KEY = os.getenv("API_KEY", "").strip()
 
 # Callback 协议格式已经通过官网真实接口验证，固定不再改变。
@@ -43,7 +44,48 @@ CALLBACK_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="evaluation-callback-serial",
 )
 
-app = FastAPI(title=APP_NAME, version="2.6.0")
+MODEL_STATUS: Dict[str, Any] = {
+    "loaded": False,
+    "ensemble_version": None,
+    "validation_rmse": None,
+    "validation_direction_accuracy": None,
+}
+
+app = FastAPI(title=APP_NAME, version=APP_VERSION)
+
+
+@app.on_event("startup")
+def preload_latest_models() -> None:
+    """
+    服务启动时一次性加载最终 LightGBM、XGBoost、scaler 和 ensemble_config。
+
+    这样做有两个目的：
+    1. 明确使用服务器 models/ 目录下刚训练出的最新模型和融合权重；
+    2. 避免官网第一次 /predict 请求承担模型反序列化时间，改善运行效率。
+
+    注意：这里只改变模型加载时机，不改变已经通过官网验证的 callback 协议。
+    """
+    started = time.perf_counter()
+    _, _, _, _, ensemble_config = load_models()
+
+    MODEL_STATUS["loaded"] = True
+    MODEL_STATUS["ensemble_version"] = ensemble_config.get("version")
+    MODEL_STATUS["validation_rmse"] = ensemble_config.get("validation_rmse")
+    MODEL_STATUS["validation_direction_accuracy"] = ensemble_config.get(
+        "validation_direction_accuracy"
+    )
+
+    lgb_weights = ensemble_config.get("lgb_weights")
+    baseline_weights = ensemble_config.get("baseline_weights")
+
+    print(
+        f"[MODEL READY] version={ensemble_config.get('version')} "
+        f"load_time={time.perf_counter() - started:.3f}s "
+        f"validation_rmse={ensemble_config.get('validation_rmse')} "
+        f"direction_acc={ensemble_config.get('validation_direction_accuracy')}"
+    )
+    print(f"[MODEL WEIGHTS] lgb={lgb_weights}")
+    print(f"[MODEL WEIGHTS] baseline={baseline_weights}")
 
 
 def ok(body: Dict[str, Any]) -> JSONResponse:
@@ -348,10 +390,16 @@ def root():
 def health():
     return {
         "status": "ok",
-        "version": "2.6.0",
+        "version": APP_VERSION,
         "lookback": LOOKBACK,
         "forecast_horizon": HORIZON,
         "target_columns": TARGET_COLUMNS,
+        "model_loaded": MODEL_STATUS["loaded"],
+        "ensemble_version": MODEL_STATUS["ensemble_version"],
+        "validation_rmse": MODEL_STATUS["validation_rmse"],
+        "validation_direction_accuracy": MODEL_STATUS[
+            "validation_direction_accuracy"
+        ],
         "callback_timeout": CALLBACK_TIMEOUT,
         "callback_retries": CALLBACK_RETRIES,
         "callback_workers": CALLBACK_WORKERS,
