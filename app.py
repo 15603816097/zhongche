@@ -13,10 +13,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from config import HORIZON, LOOKBACK, TARGET_COLUMNS
-from src.inference import load_models, predict_future
+from src.inference import LGB_INFER_THREADS, load_models, predict_future
 
 APP_NAME = "Rail Transit Time-Series Forecast API"
-APP_VERSION = "2.8.0"
+APP_VERSION = "2.9.0"
 API_KEY = os.getenv("API_KEY", "").strip()
 
 # -----------------------------------------------------------------------------
@@ -30,13 +30,12 @@ CALLBACK_RETRIES = int(os.getenv("CALLBACK_RETRIES", "5"))
 CALLBACK_WORKERS = 1
 
 # 从“收到 /predict 请求”的时刻开始计算最小等待年龄。
-# 新版不会在模型推理完成后再额外固定等待 1 秒：
-# 如果推理本身已经超过该时间，callback 可以立即发送。
+# 如果模型推理本身已经超过该时间，callback 不会额外等待。
 CALLBACK_MIN_AGE = max(
     0.0, float(os.getenv("CALLBACK_MIN_AGE", "1.0"))
 )
 
-# 连续 callback 之间保留一个小间隔，继续规避官网后端并发写入竞争。
+# 连续 callback 之间保留小间隔，规避官网后端并发写入竞争。
 CALLBACK_GAP = max(
     0.0, float(os.getenv("CALLBACK_GAP", "0.25"))
 )
@@ -49,13 +48,11 @@ CALLBACK_EXECUTOR = ThreadPoolExecutor(
 # -----------------------------------------------------------------------------
 # 异步预测执行器
 # -----------------------------------------------------------------------------
-# 官方规范明确要求：耗时任务收到 callback_url 后应立即 HTTP 200，
-# 不能先完成模型推理再返回。
-#
-# 当前最终模型单次预测内部已经会使用多核 LightGBM + GPU XGBoost，
-# 因此这里默认只启动 1 个外层预测 worker，避免 50 个并发请求把 CPU/GPU
-# 同时打满而导致每个请求都变慢。需要实验时可通过环境变量调整。
-PREDICT_WORKERS = max(1, int(os.getenv("PREDICT_WORKERS", "1")))
+# 2.8.0 使用 1 个 worker，单条约 16.6 秒时 50 条总耗时约 14 分钟，
+# 会超过官网整批异步等待窗口。
+# 2.9.0 默认使用 2 个外层 worker；内部 LightGBM 改为共享线程池的稀疏预测，
+# 不再触发 MultiOutputRegressor 的进程级 joblib 预测。
+PREDICT_WORKERS = max(1, int(os.getenv("PREDICT_WORKERS", "2")))
 PREDICT_EXECUTOR = ThreadPoolExecutor(
     max_workers=PREDICT_WORKERS,
     thread_name_prefix="evaluation-predict-worker",
@@ -95,6 +92,10 @@ def preload_latest_models() -> None:
     )
     print(f"[MODEL WEIGHTS] lgb={lgb_weights}")
     print(f"[MODEL WEIGHTS] baseline={baseline_weights}")
+    print(
+        f"[INFERENCE CONFIG] predict_workers={PREDICT_WORKERS} "
+        f"lgb_infer_threads={LGB_INFER_THREADS}"
+    )
 
 
 def ok(body: Dict[str, Any]) -> JSONResponse:
@@ -129,7 +130,10 @@ def safe_float(value: Any) -> float:
     return value if np.isfinite(value) else np.nan
 
 
-def download_history(history_url: str, target_cols: List[str]) -> List[Dict[str, Any]]:
+def download_history(
+    history_url: str,
+    target_cols: List[str],
+) -> List[Dict[str, Any]]:
     if not history_url:
         raise ValueError("history 为空，同时 history_url 也为空")
 
@@ -262,14 +266,23 @@ def run_one(payload: Dict[str, Any]) -> Dict[str, Any]:
             f"history_length={meta['history_length']} actual={len(history_df)}"
         )
 
-    started = time.perf_counter()
-    pred = repair_pred(predict_future(history_df), history_df)
+    pred, timings = predict_future(
+        history_df,
+        return_timings=True,
+    )
+    pred = repair_pred(pred, history_df)
     predictions = build_predictions(pred, meta["target_cols"])
-    infer_seconds = time.perf_counter() - started
 
     print(
         f"[PREDICT DONE] requestId={meta['request_id']} "
-        f"inference={infer_seconds:.3f}s"
+        f"total={timings['total']:.3f}s "
+        f"clean={timings['clean']:.3f}s "
+        f"feature={timings['feature']:.3f}s "
+        f"lgb={timings['lgb']:.3f}s "
+        f"xgb={timings['xgb']:.3f}s "
+        f"baseline={timings['baseline']:.3f}s "
+        f"lgb_outputs={timings['lgb_outputs']} "
+        f"lgb_threads={timings['lgb_infer_threads']}"
     )
 
     return {
@@ -334,8 +347,6 @@ def send_callback(
 ) -> None:
     request_id = str(body.get("requestId", "") or "")
 
-    # 从 /predict 收到请求的时刻计算年龄。
-    # 如果模型推理已经花了 >= CALLBACK_MIN_AGE，就不再额外等待。
     age = time.monotonic() - request_received_at
     wait_seconds = max(0.0, CALLBACK_MIN_AGE - age)
     if wait_seconds > 0:
@@ -365,8 +376,7 @@ def send_callback(
                     time.sleep(CALLBACK_GAP)
                 return
 
-            # 官网明确表示任务已经 failed 时，再重试不会恢复，
-            # 继续重试只会阻塞后续 callback，因此立即结束这一条。
+            # 官网明确表示任务已 failed 时，再重试没有意义，会阻塞后续 callback。
             if resp.status_code == 409 and "current status=failed" in response_text:
                 print(
                     f"[CALLBACK TERMINAL] requestId={request_id} "
@@ -504,6 +514,7 @@ def health():
             "validation_direction_accuracy"
         ],
         "predict_workers": PREDICT_WORKERS,
+        "lgb_infer_threads": LGB_INFER_THREADS,
         "callback_timeout": CALLBACK_TIMEOUT,
         "callback_retries": CALLBACK_RETRIES,
         "callback_workers": CALLBACK_WORKERS,
@@ -525,8 +536,8 @@ def predict(payload: Dict[str, Any], request: Request):
         if payload.get("batch") is True:
             return fail("当前联调版本要求 batch_size=1")
 
-        # 这里只做非常轻量的字段校验，绝不在异步请求的 HTTP 响应前执行模型预测。
-        meta = validate_payload(payload)
+        # 这里只做轻量字段校验，绝不在异步请求 HTTP 200 前执行模型预测。
+        validate_payload(payload)
         callback_url = str(payload.get("callback_url", "") or "")
 
         if callback_url:
@@ -546,7 +557,7 @@ def predict(payload: Dict[str, Any], request: Request):
                 }
             )
 
-        # 没有 callback_url 时才走同步模式：直接计算并返回完整 96 步预测。
+        # 无 callback_url 时走同步模式，直接返回完整 96 步预测。
         result = run_one(payload)
         return ok(
             {
