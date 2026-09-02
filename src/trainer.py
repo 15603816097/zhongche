@@ -18,8 +18,9 @@ from src.dataset_builder import (
 )
 
 
-def _fit_model(X, y, weights, n_jobs=3):
+def _fit_model(X, y, weights, n_jobs=6):
     params = LGB_PARAMS.copy()
+    # 外层并行 6 个输出模型；每个 LightGBM 自身单线程，避免嵌套并行。
     params["n_jobs"] = 1
     model = MultiOutputRegressor(
         LGBMRegressor(**params),
@@ -52,6 +53,7 @@ def train():
         f"train={len(train_idx)}, val={len(val_idx)}, "
         f"feature_dim={bundle.X.shape[1]}"
     )
+    print("LightGBM output workers=6, per-model threads=1")
 
     # 阶段A：仅用训练段拟合，用于真实验证和后续融合权重搜索。
     scaler_X_val = StandardScaler()
