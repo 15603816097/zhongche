@@ -37,6 +37,10 @@ LGB_PARAMS = {
     "verbose": -1,
 }
 
+# 服务器默认使用 RTX 4090/CUDA；如果需要在无 GPU 机器训练，可执行：
+# XGB_DEVICE=cpu python train_all.py
+XGB_DEVICE = os.getenv("XGB_DEVICE", "cuda").strip() or "cuda"
+
 XGB_PARAMS = {
     "n_estimators": 520,
     "learning_rate": 0.04,
@@ -47,6 +51,9 @@ XGB_PARAMS = {
     "reg_alpha": 0.12,
     "reg_lambda": 1.2,
     "objective": "reg:squarederror",
+    "tree_method": "hist",
+    "device": XGB_DEVICE,
+    "n_jobs": max(1, min(8, os.cpu_count() or 1)),
     "random_state": 42,
     "verbosity": 0,
 }
