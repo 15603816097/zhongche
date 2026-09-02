@@ -16,25 +16,27 @@ from config import HORIZON, LOOKBACK, TARGET_COLUMNS
 from src.inference import load_models, predict_future
 
 APP_NAME = "Rail Transit Time-Series Forecast API"
-APP_VERSION = "2.7.0"
+APP_VERSION = "2.8.0"
 API_KEY = os.getenv("API_KEY", "").strip()
 
-# Callback 协议格式已经通过官网真实接口验证，固定不再改变。
+# -----------------------------------------------------------------------------
+# 官方异步回调协议
+# -----------------------------------------------------------------------------
+# callback JSON 结构已经通过官网真实接口验证，绝对不要随意修改。
 CALLBACK_TIMEOUT = float(os.getenv("CALLBACK_TIMEOUT", "20"))
 CALLBACK_RETRIES = int(os.getenv("CALLBACK_RETRIES", "5"))
 
-# 关键：官网 callback 接口在并发写入时会出现 pending 计数不下降的现象。
-# 因此回调严格串行发送，避免多个 callback 同时到达平台官网。
+# 官网 callback 后端并发写入曾出现 pending 计数竞争，因此回调继续严格串行。
 CALLBACK_WORKERS = 1
 
-# 每个回调至少在对应 /predict 请求入队这么久之后再发送，
-# 保证官网先完成原请求登记。使用“最小年龄”而不是每条固定 sleep，
-# 因此排队中的后续回调不会重复等待 1 秒。
+# 从“收到 /predict 请求”的时刻开始计算最小等待年龄。
+# 新版不会在模型推理完成后再额外固定等待 1 秒：
+# 如果推理本身已经超过该时间，callback 可以立即发送。
 CALLBACK_MIN_AGE = max(
     0.0, float(os.getenv("CALLBACK_MIN_AGE", "1.0"))
 )
 
-# 两次 callback POST 之间保留一个很小的间隔，进一步避免官网后端写入竞争。
+# 连续 callback 之间保留一个小间隔，继续规避官网后端并发写入竞争。
 CALLBACK_GAP = max(
     0.0, float(os.getenv("CALLBACK_GAP", "0.25"))
 )
@@ -42,6 +44,21 @@ CALLBACK_GAP = max(
 CALLBACK_EXECUTOR = ThreadPoolExecutor(
     max_workers=CALLBACK_WORKERS,
     thread_name_prefix="evaluation-callback-serial",
+)
+
+# -----------------------------------------------------------------------------
+# 异步预测执行器
+# -----------------------------------------------------------------------------
+# 官方规范明确要求：耗时任务收到 callback_url 后应立即 HTTP 200，
+# 不能先完成模型推理再返回。
+#
+# 当前最终模型单次预测内部已经会使用多核 LightGBM + GPU XGBoost，
+# 因此这里默认只启动 1 个外层预测 worker，避免 50 个并发请求把 CPU/GPU
+# 同时打满而导致每个请求都变慢。需要实验时可通过环境变量调整。
+PREDICT_WORKERS = max(1, int(os.getenv("PREDICT_WORKERS", "1")))
+PREDICT_EXECUTOR = ThreadPoolExecutor(
+    max_workers=PREDICT_WORKERS,
+    thread_name_prefix="evaluation-predict-worker",
 )
 
 MODEL_STATUS: Dict[str, Any] = {
@@ -56,15 +73,7 @@ app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
 @app.on_event("startup")
 def preload_latest_models() -> None:
-    """
-    服务启动时一次性加载最终 LightGBM、XGBoost、scaler 和 ensemble_config。
-
-    这样做有两个目的：
-    1. 明确使用服务器 models/ 目录下刚训练出的最新模型和融合权重；
-    2. 避免官网第一次 /predict 请求承担模型反序列化时间，改善运行效率。
-
-    注意：这里只改变模型加载时机，不改变已经通过官网验证的 callback 协议。
-    """
+    """服务启动时一次性预加载最终模型与融合权重。"""
     started = time.perf_counter()
     _, _, _, _, ensemble_config = load_models()
 
@@ -141,7 +150,11 @@ def download_history(history_url: str, target_cols: List[str]) -> List[Dict[str,
     ]
 
 
-def history_to_df(history: Any, history_url: str, target_cols: List[str]) -> pd.DataFrame:
+def history_to_df(
+    history: Any,
+    history_url: str,
+    target_cols: List[str],
+) -> pd.DataFrame:
     if not history:
         history = download_history(history_url, target_cols)
 
@@ -217,7 +230,10 @@ def repair_pred(pred: np.ndarray, history_df: pd.DataFrame) -> np.ndarray:
     return pred
 
 
-def build_predictions(pred: np.ndarray, target_cols: List[str]) -> List[Dict[str, Any]]:
+def build_predictions(
+    pred: np.ndarray,
+    target_cols: List[str],
+) -> List[Dict[str, Any]]:
     col_index = {name: i for i, name in enumerate(TARGET_COLUMNS)}
     return [
         {
@@ -246,8 +262,15 @@ def run_one(payload: Dict[str, Any]) -> Dict[str, Any]:
             f"history_length={meta['history_length']} actual={len(history_df)}"
         )
 
+    started = time.perf_counter()
     pred = repair_pred(predict_future(history_df), history_df)
     predictions = build_predictions(pred, meta["target_cols"])
+    infer_seconds = time.perf_counter() - started
+
+    print(
+        f"[PREDICT DONE] requestId={meta['request_id']} "
+        f"inference={infer_seconds:.3f}s"
+    )
 
     return {
         "requestId": meta["request_id"],
@@ -265,7 +288,7 @@ def build_callback_payload(
     predictions: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """
-    已通过官网真实接口验证的 callback 格式，后续固定保持：
+    已通过官网真实接口验证的 callback 格式，固定保持：
 
     {
         "callback_token": "...",
@@ -307,12 +330,13 @@ def build_callback_payload(
 def send_callback(
     callback_url: str,
     body: Dict[str, Any],
-    queued_at: float,
+    request_received_at: float,
 ) -> None:
     request_id = str(body.get("requestId", "") or "")
 
-    # 只保证“入队后至少等待 CALLBACK_MIN_AGE”，不是每条固定等待。
-    age = time.monotonic() - queued_at
+    # 从 /predict 收到请求的时刻计算年龄。
+    # 如果模型推理已经花了 >= CALLBACK_MIN_AGE，就不再额外等待。
+    age = time.monotonic() - request_received_at
     wait_seconds = max(0.0, CALLBACK_MIN_AGE - age)
     if wait_seconds > 0:
         time.sleep(wait_seconds)
@@ -341,6 +365,17 @@ def send_callback(
                     time.sleep(CALLBACK_GAP)
                 return
 
+            # 官网明确表示任务已经 failed 时，再重试不会恢复，
+            # 继续重试只会阻塞后续 callback，因此立即结束这一条。
+            if resp.status_code == 409 and "current status=failed" in response_text:
+                print(
+                    f"[CALLBACK TERMINAL] requestId={request_id} "
+                    f"status=409 response={response_text!r}"
+                )
+                if CALLBACK_GAP > 0:
+                    time.sleep(CALLBACK_GAP)
+                return
+
             error = f"HTTP {resp.status_code}: {response_text}"
         except Exception as exc:
             error = repr(exc)
@@ -358,15 +393,18 @@ def send_callback(
         time.sleep(CALLBACK_GAP)
 
 
-def submit_callback(callback_url: str, body: Dict[str, Any]) -> None:
+def submit_callback(
+    callback_url: str,
+    body: Dict[str, Any],
+    request_received_at: float,
+) -> None:
     request_id = str(body.get("requestId", "") or "")
-    queued_at = time.monotonic()
     try:
         CALLBACK_EXECUTOR.submit(
             send_callback,
             callback_url,
             body,
-            queued_at,
+            request_received_at,
         )
         print(
             f"[CALLBACK QUEUED] requestId={request_id} "
@@ -375,6 +413,71 @@ def submit_callback(callback_url: str, body: Dict[str, Any]) -> None:
         )
     except Exception as exc:
         print(f"[CALLBACK QUEUE FAILED] requestId={request_id}: {exc!r}")
+
+
+def process_async_request(
+    payload: Dict[str, Any],
+    callback_url: str,
+    callback_token: Any,
+    request_received_at: float,
+) -> None:
+    """后台完成预测，并用已经验证过的 callback JSON 回传结果。"""
+    request_id = str(payload.get("requestId", "") or "")
+    started = time.perf_counter()
+
+    try:
+        result = run_one(payload)
+        callback_payload = build_callback_payload(
+            request_id=result["requestId"],
+            callback_token=callback_token,
+            code=0,
+            message="success",
+            predictions=result["predictions"],
+        )
+    except Exception as exc:
+        print(f"[ASYNC PREDICT ERROR] requestId={request_id}: {exc}")
+        traceback.print_exc()
+        callback_payload = build_callback_payload(
+            request_id=request_id,
+            callback_token=callback_token,
+            code=-1,
+            message=str(exc),
+            predictions=[],
+        )
+
+    print(
+        f"[ASYNC READY] requestId={request_id} "
+        f"elapsed={time.perf_counter() - started:.3f}s"
+    )
+    submit_callback(
+        callback_url,
+        callback_payload,
+        request_received_at,
+    )
+
+
+def submit_async_prediction(
+    payload: Dict[str, Any],
+    callback_url: str,
+    callback_token: Any,
+    request_received_at: float,
+) -> None:
+    request_id = str(payload.get("requestId", "") or "")
+    try:
+        PREDICT_EXECUTOR.submit(
+            process_async_request,
+            dict(payload),
+            callback_url,
+            callback_token,
+            request_received_at,
+        )
+        print(
+            f"[ASYNC ACCEPTED] requestId={request_id} "
+            f"predict_workers={PREDICT_WORKERS}"
+        )
+    except Exception as exc:
+        print(f"[ASYNC QUEUE FAILED] requestId={request_id}: {exc!r}")
+        raise
 
 
 @app.get("/")
@@ -400,6 +503,7 @@ def health():
         "validation_direction_accuracy": MODEL_STATUS[
             "validation_direction_accuracy"
         ],
+        "predict_workers": PREDICT_WORKERS,
         "callback_timeout": CALLBACK_TIMEOUT,
         "callback_retries": CALLBACK_RETRIES,
         "callback_workers": CALLBACK_WORKERS,
@@ -411,6 +515,8 @@ def health():
 
 @app.post("/predict")
 def predict(payload: Dict[str, Any], request: Request):
+    request_received_at = time.monotonic()
+
     auth_error = check_api_key(request)
     if auth_error is not None:
         return auth_error
@@ -419,19 +525,29 @@ def predict(payload: Dict[str, Any], request: Request):
         if payload.get("batch") is True:
             return fail("当前联调版本要求 batch_size=1")
 
-        result = run_one(payload)
-
+        # 这里只做非常轻量的字段校验，绝不在异步请求的 HTTP 响应前执行模型预测。
+        meta = validate_payload(payload)
         callback_url = str(payload.get("callback_url", "") or "")
-        if callback_url:
-            callback_payload = build_callback_payload(
-                request_id=result["requestId"],
-                callback_token=payload.get("callback_token"),
-                code=0,
-                message="success",
-                predictions=result["predictions"],
-            )
-            submit_callback(callback_url, callback_payload)
 
+        if callback_url:
+            submit_async_prediction(
+                payload=payload,
+                callback_url=callback_url,
+                callback_token=payload.get("callback_token"),
+                request_received_at=request_received_at,
+            )
+
+            # 官方异步规范：接收任务后立即 HTTP 200，计算完成后再 callback。
+            return ok(
+                {
+                    "code": 0,
+                    "message": "accepted",
+                    "predictions": [],
+                }
+            )
+
+        # 没有 callback_url 时才走同步模式：直接计算并返回完整 96 步预测。
+        result = run_one(payload)
         return ok(
             {
                 "code": 0,
@@ -454,7 +570,11 @@ def predict(payload: Dict[str, Any], request: Request):
                 message=str(exc),
                 predictions=[],
             )
-            submit_callback(callback_url, callback_payload)
+            submit_callback(
+                callback_url,
+                callback_payload,
+                request_received_at,
+            )
 
         return fail(str(exc))
 
