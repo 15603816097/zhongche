@@ -4,13 +4,12 @@ import sys
 
 import numpy as np
 from sklearn.metrics import mean_squared_error
-from sklearn.multioutput import MultiOutputRegressor
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import HORIZON, MODEL_DIR, TARGET_COLUMNS, XGB_PARAMS
+from config import HORIZON, MODEL_DIR, TARGET_COLUMNS, XGB_DEVICE, XGB_PARAMS
 from src.dataset_builder import (
     load_all_data,
     sample_weights,
@@ -18,18 +17,22 @@ from src.dataset_builder import (
 )
 
 
-def _fit_model(X, y, weights, n_jobs=3):
+def _fit_model(X, y, weights):
+    """
+    使用 XGBoost 原生多输出回归。
+
+    旧版本使用 MultiOutputRegressor，会在 Python 层创建 576 个独立模型，
+    对 GPU 利用率和训练启动开销都不理想。XGBoost 3.x 已支持二维 y，
+    因此直接一次 fit 全部 96*6 个输出。
+    """
     params = XGB_PARAMS.copy()
-    params["n_jobs"] = 1
-    model = MultiOutputRegressor(
-        XGBRegressor(**params),
-        n_jobs=n_jobs,
-    )
+    model = XGBRegressor(**params)
     model.fit(X, y, sample_weight=weights)
     return model
 
 
 def _absolute_from_delta(delta, last_values):
+    delta = np.asarray(delta, dtype=np.float64)
     return (
         delta.reshape(-1, HORIZON, len(TARGET_COLUMNS))
         + last_values[:, None, :]
@@ -38,8 +41,14 @@ def _absolute_from_delta(delta, last_values):
 
 def train():
     print("=" * 70)
-    print("XGBoost 训练：连续时序标签 + 防泄漏验证 + 最终全量重训")
+    print("XGBoost 训练：连续时序标签 + 防泄漏验证 + GPU 原生多输出")
     print("=" * 70)
+    print(f"XGBoost device: {XGB_DEVICE}")
+    print(
+        f"tree_method={XGB_PARAMS.get('tree_method')}, "
+        f"n_estimators={XGB_PARAMS.get('n_estimators')}, "
+        f"n_jobs={XGB_PARAMS.get('n_jobs')}"
+    )
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -50,10 +59,12 @@ def train():
     print(
         f"总样本={len(bundle.X)}, "
         f"train={len(train_idx)}, val={len(val_idx)}, "
-        f"feature_dim={bundle.X.shape[1]}"
+        f"feature_dim={bundle.X.shape[1]}, "
+        f"output_dim={bundle.y_delta.shape[1]}"
     )
 
     # 阶段A：验证模型。
+    # scaler 只在训练子集 fit，避免验证集信息泄漏。
     scaler_X_val = StandardScaler()
     scaler_y_val = StandardScaler()
 
@@ -61,15 +72,18 @@ def train():
     y_train = scaler_y_val.fit_transform(bundle.y_delta[train_idx])
     X_val = scaler_X_val.transform(bundle.X[val_idx])
 
+    print("开始训练验证 XGBoost ...")
     model_val = _fit_model(
         X_train,
         y_train,
         weights[train_idx],
     )
 
-    pred_delta_val = scaler_y_val.inverse_transform(
-        model_val.predict(X_val)
-    )
+    pred_scaled_val = np.asarray(model_val.predict(X_val))
+    if pred_scaled_val.ndim == 1:
+        pred_scaled_val = pred_scaled_val.reshape(len(val_idx), -1)
+
+    pred_delta_val = scaler_y_val.inverse_transform(pred_scaled_val)
     pred_abs_val = _absolute_from_delta(
         pred_delta_val,
         bundle.last_values[val_idx],
