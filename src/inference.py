@@ -32,9 +32,8 @@ DEFAULT_BASELINE_WEIGHTS = np.array(
     dtype=np.float64,
 )
 
-# LightGBM 训练时的 MultiOutputRegressor 使用进程级 joblib 并行，
-# 适合训练但不适合“单样本在线预测”：576 个小模型会产生明显进程调度/IPC 开销。
-# 在线推理改为共享线程池，直接调用真正需要的子模型。
+# LightGBM 训练模型为 576 个独立输出。在线预测直接调用所需 estimator，
+# 避免 MultiOutputRegressor.predict() 的 joblib 进程调度开销。
 LGB_INFER_THREADS = max(
     1,
     int(
@@ -88,44 +87,85 @@ def load_models():
     )
 
 
-def _weights_from_config(config):
-    lgb_weights = np.asarray(
+def _stepwise_parameters_from_config(config):
+    """
+    统一把融合配置展开成 (HORIZON, 6) 的逐步参数。
+
+    兼容：
+      V1/V2: 每个变量一套静态 LGB/BASE 权重
+      V3:     1-32 / 33-64 / 65-96 三段独立权重 + delta gain
+    """
+    n_targets = len(TARGET_COLUMNS)
+
+    old_lgb = np.asarray(
         config.get("lgb_weights", DEFAULT_LGB_WEIGHTS),
         dtype=np.float64,
     )
-    baseline_weights = np.asarray(
+    old_base = np.asarray(
         config.get("baseline_weights", DEFAULT_BASELINE_WEIGHTS),
         dtype=np.float64,
     )
+    if old_lgb.shape != (n_targets,):
+        old_lgb = DEFAULT_LGB_WEIGHTS.copy()
+    if old_base.shape != (n_targets,):
+        old_base = DEFAULT_BASELINE_WEIGHTS.copy()
 
-    if lgb_weights.shape != (len(TARGET_COLUMNS),):
-        lgb_weights = DEFAULT_LGB_WEIGHTS.copy()
-    if baseline_weights.shape != (len(TARGET_COLUMNS),):
-        baseline_weights = DEFAULT_BASELINE_WEIGHTS.copy()
+    lgb_step = np.repeat(old_lgb[None, :], HORIZON, axis=0)
+    base_step = np.repeat(old_base[None, :], HORIZON, axis=0)
+    gain_step = np.ones((HORIZON, n_targets), dtype=np.float64)
+
+    segments = config.get("horizon_segments")
+    lgb_seg = np.asarray(
+        config.get("lgb_weights_by_segment", []),
+        dtype=np.float64,
+    )
+    base_seg = np.asarray(
+        config.get("baseline_weights_by_segment", []),
+        dtype=np.float64,
+    )
+    gain_seg = np.asarray(
+        config.get("delta_gain_by_segment", []),
+        dtype=np.float64,
+    )
+
+    if isinstance(segments, (list, tuple)) and len(segments) > 0:
+        expected_shape = (len(segments), n_targets)
+        if (
+            lgb_seg.shape == expected_shape
+            and base_seg.shape == expected_shape
+            and gain_seg.shape == expected_shape
+        ):
+            for k, pair in enumerate(segments):
+                if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                    continue
+                start, end = int(pair[0]), int(pair[1])
+                start = max(0, min(HORIZON, start))
+                end = max(start, min(HORIZON, end))
+                if end <= start:
+                    continue
+                lgb_step[start:end] = lgb_seg[k]
+                base_step[start:end] = base_seg[k]
+                gain_step[start:end] = gain_seg[k]
 
     return (
-        np.clip(lgb_weights, 0.0, 1.0),
-        np.clip(baseline_weights, 0.0, 0.8),
+        np.clip(lgb_step, 0.0, 1.0),
+        np.clip(base_step, 0.0, 0.8),
+        np.clip(gain_step, 0.75, 1.35),
     )
 
 
-def _required_lgb_output_indices(lgb_weights: np.ndarray):
+def _required_lgb_output_indices(lgb_step: np.ndarray):
     """
-    y 的展平顺序是 [step0六变量, step1六变量, ...]。
-
-    某个变量的 LGB 融合权重为 0 时，该变量全部 96 个 LGB 输出都不会参与
-    最终结果，因此在线推理可以安全跳过这些子模型。
+    y 展平顺序为 [step0六变量, step1六变量, ...]。
+    V3 可按“具体步 + 具体变量”跳过 LGB 权重为 0 的输出。
     """
     n_targets = len(TARGET_COLUMNS)
-    needed_targets = [
-        j for j, weight in enumerate(lgb_weights)
-        if float(weight) > 1e-12
-    ]
-    return [
-        step * n_targets + j
-        for step in range(HORIZON)
-        for j in needed_targets
-    ]
+    required = []
+    for step in range(HORIZON):
+        for j in range(n_targets):
+            if float(lgb_step[step, j]) > 1e-12:
+                required.append(step * n_targets + j)
+    return required
 
 
 def _predict_lgb_sparse_scaled(
@@ -134,15 +174,8 @@ def _predict_lgb_sparse_scaled(
     output_dim: int,
     required_indices,
 ) -> np.ndarray:
-    """
-    对 MultiOutputRegressor 做低开销在线预测。
-
-    不调用 model_lgb.predict()，因为保存的模型 n_jobs=6，单样本时会触发
-    joblib 进程并行；这里直接在线程池中调用所需 estimator，避免进程 IPC。
-    """
     estimators = getattr(model_lgb, "estimators_", None)
     if estimators is None or len(estimators) != output_dim:
-        # 兼容未来模型结构变化：无法识别时退回标准 predict。
         pred = np.asarray(model_lgb.predict(X_lgb), dtype=np.float64)
         if pred.ndim == 1:
             pred = pred.reshape(1, -1)
@@ -170,11 +203,13 @@ def predict_future(
     """
     预测未来 96 步绝对值。
 
-    最终预测 =
-      (LGB/XGB 逐变量加权) 与 稳健趋势基线 再融合。
+    V3 最终预测：
+      1. 每个 horizon segment 独立做 LGB/XGB 融合；
+      2. 再与稳健趋势 baseline 分段融合；
+      3. 以最后历史值为锚点做轻量 delta gain，恢复被平均压平的波动。
 
-    return_timings=False 时保持原接口，只返回 ndarray。
-    return_timings=True 时返回 (pred, timings)，用于 API 性能诊断。
+    return_timings=False 时仅返回 ndarray。
+    return_timings=True 时返回 (pred, timings)。
     """
     total_started = time.perf_counter()
 
@@ -194,20 +229,19 @@ def predict_future(
         ensemble_config,
     ) = load_models()
 
-    lgb_weights, baseline_weights = _weights_from_config(
+    lgb_step, base_step, gain_step = _stepwise_parameters_from_config(
         ensemble_config
     )
 
     # ------------------------------------------------------------------
-    # LightGBM：仅计算最终融合真正需要的输出。
-    # 当前权重 current_a=0、speed_rpm=0，因此可跳过 192/576 个子模型。
+    # LightGBM：只计算真正参与 V3 融合的 step-target 输出。
     # ------------------------------------------------------------------
     lgb_started = time.perf_counter()
     X_lgb = scalers_lgb["scaler_X"].transform(
         features.reshape(1, -1)
     )
     output_dim = HORIZON * len(TARGET_COLUMNS)
-    required_lgb_indices = _required_lgb_output_indices(lgb_weights)
+    required_lgb_indices = _required_lgb_output_indices(lgb_step)
 
     delta_lgb_scaled = _predict_lgb_sparse_scaled(
         model_lgb,
@@ -221,7 +255,7 @@ def predict_future(
     lgb_seconds = time.perf_counter() - lgb_started
 
     # ------------------------------------------------------------------
-    # XGBoost：原生 576 维多输出模型，一次 GPU predict 全部输出。
+    # XGBoost：原生 576 维多输出，一次 predict。
     # ------------------------------------------------------------------
     xgb_started = time.perf_counter()
     X_xgb = scalers_xgb["scaler_X"].transform(
@@ -235,28 +269,29 @@ def predict_future(
     )[0].reshape(HORIZON, len(TARGET_COLUMNS))
     xgb_seconds = time.perf_counter() - xgb_started
 
-    last = history_clean.iloc[-1][TARGET_COLUMNS].to_numpy(
-        dtype=np.float64
-    )
+    last = history_clean.iloc[-1][TARGET_COLUMNS].to_numpy(dtype=np.float64)
     pred_lgb = delta_lgb + last.reshape(1, -1)
     pred_xgb = delta_xgb + last.reshape(1, -1)
 
     ml_pred = (
-        lgb_weights.reshape(1, -1) * pred_lgb
-        + (1.0 - lgb_weights.reshape(1, -1)) * pred_xgb
+        lgb_step * pred_lgb
+        + (1.0 - lgb_step) * pred_xgb
     )
 
     baseline_started = time.perf_counter()
-    baseline = robust_trend_forecast(
-        history_clean,
-        HORIZON,
-    )
+    baseline = robust_trend_forecast(history_clean, HORIZON)
     baseline_seconds = time.perf_counter() - baseline_started
 
     fuse_started = time.perf_counter()
     pred = (
-        (1.0 - baseline_weights.reshape(1, -1)) * ml_pred
-        + baseline_weights.reshape(1, -1) * baseline
+        (1.0 - base_step) * ml_pred
+        + base_step * baseline
+    )
+
+    # 轻量振幅/趋势恢复：只改变相对最后历史值的 delta 幅度，
+    # 不改变模型预测的主要时序形状和峰谷位置。
+    pred = last.reshape(1, -1) + gain_step * (
+        pred - last.reshape(1, -1)
     )
 
     pred = np.asarray(pred, dtype=np.float64)
@@ -281,5 +316,6 @@ def predict_future(
         "total": total_seconds,
         "lgb_outputs": len(required_lgb_indices),
         "lgb_infer_threads": LGB_INFER_THREADS,
+        "ensemble_version": ensemble_config.get("version"),
     }
     return pred, timings
