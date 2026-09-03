@@ -15,6 +15,7 @@ from src.feature_engineer import (
     extract_inference_features,
     robust_trend_forecast,
 )
+from src.trend_pattern import adaptive_pattern_forecast
 
 
 _model_lgb = None
@@ -89,11 +90,12 @@ def load_models():
 
 def _stepwise_parameters_from_config(config):
     """
-    统一把融合配置展开成 (HORIZON, 6) 的逐步参数。
+    统一把 V1/V2/V3 的主融合配置展开成 (HORIZON, 6) 逐步参数。
 
-    兼容：
-      V1/V2: 每个变量一套静态 LGB/BASE 权重
-      V3:     1-32 / 33-64 / 65-96 三段独立权重 + delta gain
+    V1/V2: 每个变量一套静态 LGB/BASE 权重
+    V3/V4: 1-32 / 33-64 / 65-96 三段独立 LGB/BASE + delta gain
+
+    V4 的 pattern 权重单独由 _pattern_weights_from_config() 处理。
     """
     n_targets = len(TARGET_COLUMNS)
 
@@ -154,10 +156,43 @@ def _stepwise_parameters_from_config(config):
     )
 
 
+def _pattern_weights_from_config(config):
+    """展开 V4 pattern 注入权重；旧配置默认全 0，完全兼容。"""
+    weights = np.zeros(
+        (HORIZON, len(TARGET_COLUMNS)),
+        dtype=np.float64,
+    )
+
+    segments = config.get("horizon_segments_v4")
+    by_segment = np.asarray(
+        config.get("pattern_weights_by_segment", []),
+        dtype=np.float64,
+    )
+
+    if not isinstance(segments, (list, tuple)) or len(segments) == 0:
+        return weights
+
+    expected = (len(segments), len(TARGET_COLUMNS))
+    if by_segment.shape != expected:
+        return weights
+
+    for k, pair in enumerate(segments):
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            continue
+        start, end = int(pair[0]), int(pair[1])
+        start = max(0, min(HORIZON, start))
+        end = max(start, min(HORIZON, end))
+        if end <= start:
+            continue
+        weights[start:end] = by_segment[k]
+
+    return np.clip(weights, 0.0, 0.8)
+
+
 def _required_lgb_output_indices(lgb_step: np.ndarray):
     """
     y 展平顺序为 [step0六变量, step1六变量, ...]。
-    V3 可按“具体步 + 具体变量”跳过 LGB 权重为 0 的输出。
+    可按“具体步 + 具体变量”跳过 LGB 权重为 0 的输出。
     """
     n_targets = len(TARGET_COLUMNS)
     required = []
@@ -203,10 +238,15 @@ def predict_future(
     """
     预测未来 96 步绝对值。
 
-    V3 最终预测：
+    V3 主干：
       1. 每个 horizon segment 独立做 LGB/XGB 融合；
-      2. 再与稳健趋势 baseline 分段融合；
-      3. 以最后历史值为锚点做轻量 delta gain，恢复被平均压平的波动。
+      2. 再与稳健线性趋势 baseline 分段融合；
+      3. 以最后历史值为锚点做轻量 delta gain。
+
+    V4 在 V3 主干之后增加保守的 adaptive pattern trend 注入：
+      - 仅当本地验证搜索给某段/某变量 pattern_weight > 0 时启用；
+      - 用最近差分的可信重复形状补峰谷和波动；
+      - pattern 本身有衰减和鲁棒限幅，不直接复制原曲线。
 
     return_timings=False 时仅返回 ndarray。
     return_timings=True 时返回 (pred, timings)。
@@ -232,9 +272,10 @@ def predict_future(
     lgb_step, base_step, gain_step = _stepwise_parameters_from_config(
         ensemble_config
     )
+    pattern_step = _pattern_weights_from_config(ensemble_config)
 
     # ------------------------------------------------------------------
-    # LightGBM：只计算真正参与 V3 融合的 step-target 输出。
+    # LightGBM：只计算真正参与融合的 step-target 输出。
     # ------------------------------------------------------------------
     lgb_started = time.perf_counter()
     X_lgb = scalers_lgb["scaler_X"].transform(
@@ -288,18 +329,30 @@ def predict_future(
         + base_step * baseline
     )
 
-    # 轻量振幅/趋势恢复：只改变相对最后历史值的 delta 幅度，
-    # 不改变模型预测的主要时序形状和峰谷位置。
     pred = last.reshape(1, -1) + gain_step * (
         pred - last.reshape(1, -1)
     )
+    fuse_seconds = time.perf_counter() - fuse_started
+
+    # ------------------------------------------------------------------
+    # V4 pattern trend：只有配置里实际使用 pattern 时才计算，避免额外开销。
+    # ------------------------------------------------------------------
+    pattern_seconds = 0.0
+    pattern_outputs = int(np.count_nonzero(pattern_step > 1e-12))
+    if pattern_outputs > 0:
+        pattern_started = time.perf_counter()
+        pattern_pred = adaptive_pattern_forecast(history_clean, HORIZON)
+        pred = (
+            (1.0 - pattern_step) * pred
+            + pattern_step * pattern_pred
+        )
+        pattern_seconds = time.perf_counter() - pattern_started
 
     pred = np.asarray(pred, dtype=np.float64)
     bad = ~np.isfinite(pred)
     if np.any(bad):
         fallback = np.tile(last, (HORIZON, 1))
         pred[bad] = fallback[bad]
-    fuse_seconds = time.perf_counter() - fuse_started
 
     total_seconds = time.perf_counter() - total_started
 
@@ -313,8 +366,10 @@ def predict_future(
         "xgb": xgb_seconds,
         "baseline": baseline_seconds,
         "fuse": fuse_seconds,
+        "pattern": pattern_seconds,
         "total": total_seconds,
         "lgb_outputs": len(required_lgb_indices),
+        "pattern_outputs": pattern_outputs,
         "lgb_infer_threads": LGB_INFER_THREADS,
         "ensemble_version": ensemble_config.get("version"),
     }
