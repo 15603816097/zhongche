@@ -23,6 +23,8 @@ _model_xgb = None
 _scalers_lgb = None
 _scalers_xgb = None
 _ensemble_config = None
+_model_trend_xgb = None
+_scalers_trend_xgb = None
 
 DEFAULT_LGB_WEIGHTS = np.array(
     [0.65] * len(TARGET_COLUMNS),
@@ -88,14 +90,31 @@ def load_models():
     )
 
 
+def load_trend_model():
+    """V5 被接受后才会调用；旧配置完全不会产生额外模型加载/推理开销。"""
+    global _model_trend_xgb, _scalers_trend_xgb
+
+    if _model_trend_xgb is None:
+        model_path = MODEL_DIR / "model_trend_xgb.pkl"
+        scaler_path = MODEL_DIR / "scaler_trend_xgb.pkl"
+        if not model_path.exists() or not scaler_path.exists():
+            raise FileNotFoundError(
+                "V5 配置已启用，但缺少 model_trend_xgb.pkl 或 scaler_trend_xgb.pkl"
+            )
+        with open(model_path, "rb") as f:
+            _model_trend_xgb = pickle.load(f)
+        with open(scaler_path, "rb") as f:
+            _scalers_trend_xgb = pickle.load(f)
+
+    return _model_trend_xgb, _scalers_trend_xgb
+
+
 def _stepwise_parameters_from_config(config):
     """
     统一把 V1/V2/V3 的主融合配置展开成 (HORIZON, 6) 逐步参数。
 
     V1/V2: 每个变量一套静态 LGB/BASE 权重
-    V3/V4: 1-32 / 33-64 / 65-96 三段独立 LGB/BASE + delta gain
-
-    V4 的 pattern 权重单独由 _pattern_weights_from_config() 处理。
+    V3+:   1-32 / 33-64 / 65-96 三段独立 LGB/BASE + delta gain
     """
     n_targets = len(TARGET_COLUMNS)
 
@@ -189,6 +208,27 @@ def _pattern_weights_from_config(config):
     return np.clip(weights, 0.0, 0.8)
 
 
+def _trend_parameters_from_config(config):
+    """V5 监督趋势参数；未启用时 alpha/beta 全 0。"""
+    n_targets = len(TARGET_COLUMNS)
+    alpha = np.asarray(
+        config.get("trend_shape_alpha", [0.0] * n_targets),
+        dtype=np.float64,
+    )
+    beta = np.asarray(
+        config.get("trend_level_beta", [0.0] * n_targets),
+        dtype=np.float64,
+    )
+    if alpha.shape != (n_targets,):
+        alpha = np.zeros(n_targets, dtype=np.float64)
+    if beta.shape != (n_targets,):
+        beta = np.zeros(n_targets, dtype=np.float64)
+    return (
+        np.clip(alpha, 0.0, 1.5),
+        np.clip(beta, 0.0, 0.5),
+    )
+
+
 def _required_lgb_output_indices(lgb_step: np.ndarray):
     """
     y 展平顺序为 [step0六变量, step1六变量, ...]。
@@ -231,6 +271,41 @@ def _predict_lgb_sparse_scaled(
     return pred_scaled
 
 
+def _predict_supervised_trend(features, config):
+    """
+    返回 V5 的 (linear_displacement, zero_endpoint_shape, seconds)。
+    趋势模型直接预测逐步一阶差分，再把累计位移拆成线性终点和局部形状。
+    """
+    alpha, beta = _trend_parameters_from_config(config)
+    if not (np.any(alpha > 1e-12) or np.any(beta > 1e-12)):
+        zeros = np.zeros((HORIZON, len(TARGET_COLUMNS)), dtype=np.float64)
+        return zeros, zeros, 0.0, 0
+
+    started = time.perf_counter()
+    model, scalers = load_trend_model()
+    X = scalers["scaler_X"].transform(features.reshape(1, -1))
+    pred_scaled = np.asarray(model.predict(X))
+    if pred_scaled.ndim == 1:
+        pred_scaled = pred_scaled.reshape(1, -1)
+    step_diff = scalers["scaler_y"].inverse_transform(pred_scaled)[0].reshape(
+        HORIZON, len(TARGET_COLUMNS)
+    )
+
+    cumulative = np.cumsum(step_diff, axis=0)
+    frac = (
+        np.arange(1, HORIZON + 1, dtype=np.float64) / float(HORIZON)
+    ).reshape(HORIZON, 1)
+    linear = frac * cumulative[-1:].copy()
+    shape = cumulative - linear
+
+    return (
+        linear,
+        shape,
+        time.perf_counter() - started,
+        int(np.count_nonzero(alpha > 1e-12) + np.count_nonzero(beta > 1e-12)),
+    )
+
+
 def predict_future(
     history_df: pd.DataFrame,
     return_timings: bool = False,
@@ -238,15 +313,9 @@ def predict_future(
     """
     预测未来 96 步绝对值。
 
-    V3 主干：
-      1. 每个 horizon segment 独立做 LGB/XGB 融合；
-      2. 再与稳健线性趋势 baseline 分段融合；
-      3. 以最后历史值为锚点做轻量 delta gain。
-
-    V4 在 V3 主干之后增加保守的 adaptive pattern trend 注入：
-      - 仅当本地验证搜索给某段/某变量 pattern_weight > 0 时启用；
-      - 用最近差分的可信重复形状补峰谷和波动；
-      - pattern 本身有衰减和鲁棒限幅，不直接复制原曲线。
+    V3 主干：LGB/XGB 分段融合 + robust trend baseline + delta gain。
+    V4（若配置接受）：保守 adaptive pattern 注入。
+    V5（若配置接受）：监督式一阶差分 XGBoost 只补局部峰谷/波动和少量整体位移。
 
     return_timings=False 时仅返回 ndarray。
     return_timings=True 时返回 (pred, timings)。
@@ -273,6 +342,7 @@ def predict_future(
         ensemble_config
     )
     pattern_step = _pattern_weights_from_config(ensemble_config)
+    trend_alpha, trend_beta = _trend_parameters_from_config(ensemble_config)
 
     # ------------------------------------------------------------------
     # LightGBM：只计算真正参与融合的 step-target 输出。
@@ -328,14 +398,13 @@ def predict_future(
         (1.0 - base_step) * ml_pred
         + base_step * baseline
     )
-
     pred = last.reshape(1, -1) + gain_step * (
         pred - last.reshape(1, -1)
     )
     fuse_seconds = time.perf_counter() - fuse_started
 
     # ------------------------------------------------------------------
-    # V4 pattern trend：只有配置里实际使用 pattern 时才计算，避免额外开销。
+    # V4 pattern trend：只有配置里实际使用 pattern 时才计算。
     # ------------------------------------------------------------------
     pattern_seconds = 0.0
     pattern_outputs = int(np.count_nonzero(pattern_step > 1e-12))
@@ -347,6 +416,21 @@ def predict_future(
             + pattern_step * pattern_pred
         )
         pattern_seconds = time.perf_counter() - pattern_started
+
+    # ------------------------------------------------------------------
+    # V5 supervised trend：alpha 只注入零终点 shape，beta 只修正整体位移。
+    # ------------------------------------------------------------------
+    trend_linear, trend_shape, trend_seconds, trend_outputs = _predict_supervised_trend(
+        features,
+        ensemble_config,
+    )
+    if trend_outputs > 0:
+        base_delta = pred - last.reshape(1, -1)
+        pred = last.reshape(1, -1) + (
+            (1.0 - trend_beta.reshape(1, -1)) * base_delta
+            + trend_beta.reshape(1, -1) * trend_linear
+            + trend_alpha.reshape(1, -1) * trend_shape
+        )
 
     pred = np.asarray(pred, dtype=np.float64)
     bad = ~np.isfinite(pred)
@@ -367,9 +451,11 @@ def predict_future(
         "baseline": baseline_seconds,
         "fuse": fuse_seconds,
         "pattern": pattern_seconds,
+        "trend": trend_seconds,
         "total": total_seconds,
         "lgb_outputs": len(required_lgb_indices),
         "pattern_outputs": pattern_outputs,
+        "trend_outputs": trend_outputs,
         "lgb_infer_threads": LGB_INFER_THREADS,
         "ensemble_version": ensemble_config.get("version"),
     }
