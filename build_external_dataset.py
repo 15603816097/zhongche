@@ -37,7 +37,7 @@ def finite_summary(series: pd.Series) -> dict[str, float | int | None]:
     }
 
 
-def build_kaist(feature_hz: float, limit: int | None) -> list[dict]:
+def build_kaist(feature_hz: float, limit: int | None) -> tuple[list[dict], list[dict]]:
     root = find_kaist_root()
     adapter = KaistAdapter(root)
     conditions = adapter.list_conditions(require_acoustic=False)
@@ -50,6 +50,7 @@ def build_kaist(feature_hz: float, limit: int | None) -> list[dict]:
     output_dir = PROCESSED / "kaist_runs"
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest: list[dict] = []
+    failed: list[dict] = []
 
     print(f"KAIST root       : {root}")
     print(f"KAIST conditions : {len(adapter.list_conditions())}")
@@ -58,7 +59,26 @@ def build_kaist(feature_hz: float, limit: int | None) -> list[dict]:
 
     for i, condition in enumerate(conditions, 1):
         print(f"[{i:02d}/{len(conditions):02d}] {condition.stem}")
-        df = adapter.load_condition(condition, feature_hz=feature_hz)
+        try:
+            df = adapter.load_condition(condition, feature_hz=feature_hz)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            print(f"    SKIP: {error}")
+            failed.append(
+                {
+                    "condition": condition.stem,
+                    "error": error,
+                    "vibration": str(condition.vibration_path.relative_to(ROOT)),
+                    "tdms": str(condition.tdms_path.relative_to(ROOT)),
+                    "acoustic": (
+                        None
+                        if condition.acoustic_path is None
+                        else str(condition.acoustic_path.relative_to(ROOT))
+                    ),
+                }
+            )
+            continue
+
         out = output_dir / f"{condition.stem}.csv"
         df.to_csv(out, index=False)
 
@@ -67,6 +87,8 @@ def build_kaist(feature_hz: float, limit: int | None) -> list[dict]:
             "rows": int(len(df)),
             "duration_s": float(df["time_s"].iloc[-1]) if len(df) else 0.0,
             "has_acoustic": bool(df["acoustic_db"].notna().any()),
+            "temperature_channel_count": int(df["temperature_channel_count"].iloc[0]) if len(df) else 0,
+            "current_channel_count": int(df["current_channel_count"].iloc[0]) if len(df) else 0,
             "output": str(out.relative_to(ROOT)),
             "stats": {
                 col: finite_summary(df[col])
@@ -75,7 +97,14 @@ def build_kaist(feature_hz: float, limit: int | None) -> list[dict]:
         }
         manifest.append(row)
 
-    return manifest
+    if failed:
+        print(f"KAIST skipped     : {len(failed)}")
+        for item in failed:
+            print(f"  - {item['condition']}: {item['error']}")
+    else:
+        print("KAIST skipped     : 0")
+
+    return manifest, failed
 
 
 def build_metropt(nrows: int | None) -> dict:
@@ -139,7 +168,7 @@ def main() -> int:
     print("=" * 100)
     print("BUILD EXTERNAL SOURCE-DOMAIN DATA")
     print("=" * 100)
-    kaist_manifest = build_kaist(args.feature_hz, args.kaist_limit)
+    kaist_manifest, kaist_failed = build_kaist(args.feature_hz, args.kaist_limit)
 
     print("\n" + "=" * 100)
     metro_manifest = build_metropt(args.metro_rows)
@@ -154,6 +183,7 @@ def main() -> int:
 
     manifest = {
         "kaist": kaist_manifest,
+        "kaist_failed": kaist_failed,
         "metropt": metro_manifest,
         "official_calibration": str(calibration_path.relative_to(ROOT)),
         "important_note": (
@@ -167,6 +197,8 @@ def main() -> int:
     print("\n" + "=" * 100)
     print("BUILD COMPLETE")
     print("=" * 100)
+    print(f"KAIST success    : {len(kaist_manifest)}")
+    print(f"KAIST skipped    : {len(kaist_failed)}")
     print(f"manifest         : {manifest_path}")
     print("NOTE: no online V8 model/API files were modified.")
     return 0
