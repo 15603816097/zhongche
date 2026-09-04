@@ -30,6 +30,10 @@ class KaistAdapter:
 
     This adapter deliberately does NOT force the KAIST data into the competition's six-column
     target space. It preserves real source-domain values first; domain calibration is a separate step.
+
+    Some KAIST TDMS files contain channel definitions with zero samples. Those channels are metadata
+    artefacts, not usable sensor streams, so they are ignored rather than truncating every modality
+    to length zero.
     """
 
     def __init__(self, dataset_root: str | Path):
@@ -84,7 +88,14 @@ class KaistAdapter:
         values = np.asarray(signal.y_values.values, dtype=np.float64)
         dt = float(signal.x_values.increment)
         unit = str(signal.y_values.quantity.label)
+        if values.size == 0:
+            raise ValueError(f"empty MAT signal in {path}")
         return values, dt, unit
+
+    @staticmethod
+    def _is_usable_channel(arr: np.ndarray) -> bool:
+        arr = np.asarray(arr)
+        return bool(arr.size > 0 and np.isfinite(arr).any())
 
     @staticmethod
     def _load_tdms_channels(path: Path) -> tuple[list[np.ndarray], list[np.ndarray], float]:
@@ -99,30 +110,50 @@ class KaistAdapter:
                 unit = str(props.get("unit_string", "")).strip()
                 if unit not in {"°C", "A"}:
                     continue
+
                 arr = np.asarray(channel[:], dtype=np.float64)
+                # Several files expose zero-length TDMS channels. Keeping them would make
+                # min(channel_lengths)==0 and incorrectly discard an otherwise valid run.
+                if not KaistAdapter._is_usable_channel(arr):
+                    continue
+
                 if unit == "°C":
                     temperature.append(arr)
                 elif unit == "A":
                     current.append(arr)
+
                 inc = props.get("wf_increment")
                 if inc is not None:
-                    increments.append(float(inc))
+                    try:
+                        inc = float(inc)
+                    except (TypeError, ValueError):
+                        inc = np.nan
+                    if np.isfinite(inc) and inc > 0:
+                        increments.append(inc)
 
         if not temperature:
-            raise ValueError(f"no °C channels found in {path}")
+            raise ValueError(f"no usable °C channels found in {path}")
         if not current:
-            raise ValueError(f"no A channels found in {path}")
+            raise ValueError(f"no usable A channels found in {path}")
         if not increments:
-            raise ValueError(f"no wf_increment found in {path}")
+            raise ValueError(f"no valid wf_increment found in {path}")
 
         return temperature, current, float(np.median(increments))
 
     @staticmethod
     def _stack_same_length(channels: list[np.ndarray]) -> np.ndarray:
-        n = min(len(x) for x in channels)
+        usable = [
+            np.asarray(x, dtype=np.float64).reshape(-1)
+            for x in channels
+            if KaistAdapter._is_usable_channel(x)
+        ]
+        if not usable:
+            raise ValueError("no usable non-empty channels")
+
+        n = min(len(x) for x in usable)
         if n <= 0:
-            raise ValueError("empty channel")
-        return np.column_stack([x[:n] for x in channels])
+            raise ValueError("all usable channels are empty")
+        return np.column_stack([x[:n] for x in usable])
 
     @staticmethod
     def parse_condition(stem: str) -> tuple[float | None, str]:
@@ -190,4 +221,6 @@ class KaistAdapter:
         df["fault"] = fault
         df["load_nm"] = np.nan if load_nm is None else load_nm
         df["feature_hz"] = float(feature_hz)
+        df["temperature_channel_count"] = int(len(temp_channels))
+        df["current_channel_count"] = int(len(current_channels))
         return df
