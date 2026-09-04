@@ -1,0 +1,257 @@
+from __future__ import annotations
+
+import argparse
+import json
+from dataclasses import fields
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from evaluate_tcn_official_zero_shot import (
+    ACTIVE_INDEX,
+    ACTIVE_TARGETS,
+    TARGETS,
+    _direction_accuracy,
+    _gain,
+    _mae,
+    _rmse,
+    _safe_corr,
+    _volatility_ratio,
+)
+from src.deep.patchtst_forecaster import MaskedPatchTSTForecaster, PatchTSTConfig
+
+
+ROOT = Path(__file__).resolve().parent
+DEFAULT_CORPUS = ROOT / "external_data" / "corpus" / "official_finetune_v1.npz"
+DEFAULT_CHECKPOINT = ROOT / "models" / "deep" / "patchtst_v1_pretrain.pt"
+DEFAULT_METRICS = ROOT / "models" / "deep" / "patchtst_v1_official_zero_shot.json"
+DEFAULT_TCN_METRICS = ROOT / "models" / "deep" / "tcn_v1_official_zero_shot.json"
+
+
+def _config_from_checkpoint(raw: dict) -> PatchTSTConfig:
+    cfg = raw.get("config", {})
+    allowed = {f.name for f in fields(PatchTSTConfig)}
+    cfg = {k: v for k, v in dict(cfg).items() if k in allowed}
+    return PatchTSTConfig(**cfg)
+
+
+def _load_tcn_reference(path: Path) -> dict[str, float]:
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        pooled = raw.get("pooled", {})
+        out: dict[str, float] = {}
+        for name in ACTIVE_TARGETS:
+            item = pooled.get(name, {})
+            value = item.get("rmse_z_gain_pct")
+            if value is not None and np.isfinite(float(value)):
+                out[name] = float(value)
+        return out
+    except Exception:
+        return {}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
+    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+    parser.add_argument("--output", type=Path, default=DEFAULT_METRICS)
+    parser.add_argument("--tcn-metrics", type=Path, default=DEFAULT_TCN_METRICS)
+    parser.add_argument("--device", type=str, default="auto")
+    args = parser.parse_args()
+
+    if not args.corpus.is_file():
+        raise FileNotFoundError(f"missing official corpus: {args.corpus}")
+    if not args.checkpoint.is_file():
+        raise FileNotFoundError(f"missing PatchTST checkpoint: {args.checkpoint}")
+
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args.device)
+
+    data = np.load(args.corpus, allow_pickle=False)
+    X = data["X"].astype(np.float32, copy=False)
+    Y = data["Y"].astype(np.float32, copy=False)
+    mask = data["mask"].astype(np.float32, copy=False)
+    center = data["center"].astype(np.float32, copy=False)
+    scale = data["scale"].astype(np.float32, copy=False)
+    group_id = data["group_id"].astype(str)
+    targets = data["targets"].astype(str).tolist()
+    if targets != TARGETS:
+        raise RuntimeError(f"target mismatch: {targets}")
+
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    config = _config_from_checkpoint(checkpoint)
+    model = MaskedPatchTSTForecaster(config).to(device)
+    model.load_state_dict(checkpoint["model_state"])
+    model.eval()
+
+    with torch.no_grad():
+        tx = torch.from_numpy(X).to(device=device, dtype=torch.float32)
+        tm = torch.from_numpy(mask).to(device=device, dtype=torch.float32)
+        pred_z = model(tx, tm).cpu().numpy().astype(np.float64)
+
+    true_z = Y.astype(np.float64)
+    persistence_z = np.repeat(X[:, -1:, :].astype(np.float64), Y.shape[1], axis=1)
+
+    center64 = center.astype(np.float64)[:, None, :]
+    scale64 = scale.astype(np.float64)[:, None, :]
+    pred_phys = pred_z * scale64 + center64
+    true_phys = true_z * scale64 + center64
+    persistence_phys = persistence_z * scale64 + center64
+
+    tcn_reference = _load_tcn_reference(args.tcn_metrics)
+    per_sequence: dict[str, dict] = {}
+    pooled: dict[str, dict] = {}
+
+    print("=" * 100)
+    print("PATCHTST V1 OFFICIAL-DOMAIN ZERO-SHOT EVALUATION")
+    print("=" * 100)
+    print(f"device             : {device}")
+    if device.type == "cuda":
+        print(f"gpu                : {torch.cuda.get_device_name(device)}")
+    print(f"checkpoint         : {args.checkpoint}")
+    print(f"official corpus    : {args.corpus}")
+    print(f"samples            : {len(X)}")
+    print(f"active targets     : {ACTIVE_TARGETS}")
+    print("NOTE               : no official sample was used to update model weights in this test")
+
+    for i, gid in enumerate(group_id):
+        row: dict[str, dict] = {}
+        print("\n" + "-" * 100)
+        print(gid)
+        for j in ACTIVE_INDEX:
+            name = TARGETS[j]
+            if mask[i, j] <= 0.5:
+                continue
+            p = pred_phys[i, :, j]
+            y = true_phys[i, :, j]
+            b = persistence_phys[i, :, j]
+            dp = np.diff(p)
+            dy = np.diff(y)
+            item = {
+                "rmse": _rmse(p, y),
+                "persistence_rmse": _rmse(b, y),
+                "rmse_gain_pct": 0.0,
+                "mae": _mae(p, y),
+                "persistence_mae": _mae(b, y),
+                "diff_corr": _safe_corr(dp, dy),
+                "direction_accuracy": _direction_accuracy(dp, dy),
+                "volatility_ratio": _volatility_ratio(dp, dy),
+            }
+            item["rmse_gain_pct"] = _gain(item["persistence_rmse"], item["rmse"])
+            row[name] = item
+            print(
+                f"  {name:16s}: RMSE={item['rmse']:.6f} "
+                f"persist={item['persistence_rmse']:.6f} "
+                f"gain={item['rmse_gain_pct']:+.2f}% "
+                f"diff_corr={item['diff_corr']:+.4f} "
+                f"dir={item['direction_accuracy']:.3f} "
+                f"vol={item['volatility_ratio']:.3f}"
+            )
+        per_sequence[str(gid)] = row
+
+    print("\n" + "=" * 100)
+    print("POOLED OFFICIAL RESULTS")
+    print("=" * 100)
+
+    target_gains: list[float] = []
+    positive_targets = 0
+    patch_vs_tcn_wins = 0
+    for j in ACTIVE_INDEX:
+        name = TARGETS[j]
+        valid = mask[:, j] > 0.5
+        p = pred_phys[valid, :, j]
+        y = true_phys[valid, :, j]
+        b = persistence_phys[valid, :, j]
+        pz = pred_z[valid, :, j]
+        yz = true_z[valid, :, j]
+        bz = persistence_z[valid, :, j]
+
+        rmse_phys = _rmse(p, y)
+        base_rmse_phys = _rmse(b, y)
+        rmse_z = _rmse(pz, yz)
+        base_rmse_z = _rmse(bz, yz)
+        gain_z = _gain(base_rmse_z, rmse_z)
+        gain_phys = _gain(base_rmse_phys, rmse_phys)
+        dp = np.diff(p, axis=1).reshape(-1)
+        dy = np.diff(y, axis=1).reshape(-1)
+
+        item = {
+            "rmse": rmse_phys,
+            "persistence_rmse": base_rmse_phys,
+            "rmse_gain_pct": gain_phys,
+            "rmse_z": rmse_z,
+            "persistence_rmse_z": base_rmse_z,
+            "rmse_z_gain_pct": gain_z,
+            "mae": _mae(p, y),
+            "persistence_mae": _mae(b, y),
+            "diff_corr": _safe_corr(dp, dy),
+            "direction_accuracy": _direction_accuracy(dp, dy),
+            "volatility_ratio": _volatility_ratio(dp, dy),
+            "samples": int(valid.sum()),
+        }
+        pooled[name] = item
+        target_gains.append(gain_z)
+        if gain_z > 0.0:
+            positive_targets += 1
+
+        compare_text = ""
+        if name in tcn_reference:
+            tcn_gain = tcn_reference[name]
+            delta = gain_z - tcn_gain
+            if delta > 0.0:
+                patch_vs_tcn_wins += 1
+            item["tcn_zero_shot_gain_z_pct"] = tcn_gain
+            item["patch_minus_tcn_gain_z_pct"] = delta
+            compare_text = f" | vs TCN gain {tcn_gain:+.2f}% ({delta:+.2f} pp)"
+
+        print(
+            f"{name:16s}: RMSE_z={rmse_z:.6f} persist_z={base_rmse_z:.6f} "
+            f"gain_z={gain_z:+.2f}% | physical RMSE={rmse_phys:.6f} "
+            f"gain={gain_phys:+.2f}% | diff_corr={item['diff_corr']:+.4f}{compare_text}"
+        )
+
+    macro_gain_z = float(np.mean(target_gains)) if target_gains else float("nan")
+    median_gain_z = float(np.median(target_gains)) if target_gains else float("nan")
+    gate_pass = bool(positive_targets >= 2 and median_gain_z > 0.0)
+
+    print("\n" + "-" * 100)
+    print(f"positive targets   : {positive_targets}/{len(ACTIVE_TARGETS)}")
+    print(f"macro gain_z       : {macro_gain_z:+.2f}%")
+    print(f"median gain_z      : {median_gain_z:+.2f}%")
+    if tcn_reference:
+        print(f"PatchTST beats TCN : {patch_vs_tcn_wins}/{len(tcn_reference)} targets by normalized RMSE gain")
+    print(f"ZERO-SHOT GATE     : {'PASS' if gate_pass else 'REJECT'}")
+
+    result = {
+        "model": "patchtst_v1_source_pretrain_official_zero_shot",
+        "checkpoint_epoch": int(checkpoint.get("epoch", -1)),
+        "device": str(device),
+        "samples": int(len(X)),
+        "active_targets": ACTIVE_TARGETS,
+        "per_sequence": per_sequence,
+        "pooled": pooled,
+        "positive_targets": int(positive_targets),
+        "macro_gain_z_pct": macro_gain_z,
+        "median_gain_z_pct": median_gain_z,
+        "zero_shot_gate_pass": gate_pass,
+        "patchtst_beats_tcn_targets": int(patch_vs_tcn_wins) if tcn_reference else None,
+        "gate_rule": "positive normalized-RMSE gain on >=2/4 active targets and positive median gain",
+        "important_note": (
+            "This is a frozen zero-shot domain-transfer test. Official samples are evaluation data only; "
+            "no fine-tuning or online V8/API/callback modification occurs here."
+        ),
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"metrics            : {args.output}")
+    print("NOTE: online V8/API/callback files were not modified.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
