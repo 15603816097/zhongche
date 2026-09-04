@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import fields
-from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -23,6 +21,7 @@ TEMP_IDX = TARGET_COLUMNS.index(TEMP_NAME)
 
 _MODEL: MaskedPatchTSTForecaster | None = None
 _DEVICE: torch.device | None = None
+_WARMED_DEVICE_KEYS: set[str] = set()
 
 
 def _config_from_checkpoint(raw: dict) -> PatchTSTConfig:
@@ -40,13 +39,22 @@ def _resolve_device(device: str | torch.device | None = None) -> torch.device:
     return torch.device(requested)
 
 
+def _device_key(device: torch.device) -> str:
+    if device.type != "cuda":
+        return str(device)
+    index = device.index
+    if index is None:
+        index = torch.cuda.current_device()
+    return f"cuda:{index}"
+
+
 def load_patchtst_temperature_runtime(
     device: str | torch.device | None = None,
 ) -> tuple[MaskedPatchTSTForecaster, torch.device]:
     """Load the frozen PatchTST candidate once.
 
-    This module is candidate-only. Importing it does not modify V8, the API, callback
-    payloads, or ensemble_config.pkl.
+    Importing/loading this module does not modify V8, the API, callback payloads,
+    or ensemble_config.pkl.
     """
     global _MODEL, _DEVICE
 
@@ -67,10 +75,56 @@ def load_patchtst_temperature_runtime(
     return model, wanted
 
 
+def warmup_patchtst_temperature_runtime(
+    device: str | torch.device | None = None,
+    *,
+    runs: int = 2,
+) -> float:
+    """Execute real forward passes at startup so the first request is warm.
+
+    Merely loading weights does not initialize all CUDA/Transformer kernels. On the
+    RTX 4090 this first real forward was observed to cost ~250 ms while steady-state
+    calls were ~4-9 ms. This function moves that one-time cost into API startup.
+
+    Returns elapsed warmup seconds. Repeated calls on an already-warmed device are
+    effectively no-ops.
+    """
+    model, runtime_device = load_patchtst_temperature_runtime(device)
+    key = _device_key(runtime_device)
+    if key in _WARMED_DEVICE_KEYS:
+        return 0.0
+
+    started = time.perf_counter()
+    config = model.config
+    tx = torch.zeros(
+        (1, config.input_length, config.output_channels),
+        dtype=torch.float32,
+        device=runtime_device,
+    )
+    tm = torch.ones(
+        (1, config.output_channels),
+        dtype=torch.float32,
+        device=runtime_device,
+    )
+
+    with torch.inference_mode():
+        for _ in range(max(1, int(runs))):
+            out = model(tx, tm)
+            if out.shape != (1, config.horizon, config.output_channels):
+                raise RuntimeError(f"unexpected PatchTST warmup output shape: {tuple(out.shape)}")
+
+    if runtime_device.type == "cuda":
+        torch.cuda.synchronize(runtime_device)
+
+    _WARMED_DEVICE_KEYS.add(key)
+    return time.perf_counter() - started
+
+
 def clear_patchtst_temperature_runtime() -> None:
     global _MODEL, _DEVICE
     _MODEL = None
     _DEVICE = None
+    _WARMED_DEVICE_KEYS.clear()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
