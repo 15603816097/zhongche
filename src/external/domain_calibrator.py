@@ -45,6 +45,11 @@ class OfficialDomainCalibrator:
             if frames:
                 yield seq_dir.name, pd.concat(frames, ignore_index=True)
 
+    @staticmethod
+    def _finite_values(series: pd.Series) -> np.ndarray:
+        x = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
+        return x[np.isfinite(x)]
+
     def compute_stats(self) -> dict:
         all_frames = list(self._sequence_frames())
         if not all_frames:
@@ -61,12 +66,20 @@ class OfficialDomainCalibrator:
         variables = result["variables"]
         assert isinstance(variables, dict)
         for col in TARGET_COLUMNS:
-            x = pd.to_numeric(pooled[col], errors="coerce").to_numpy(dtype=float)
-            x = x[np.isfinite(x)]
+            x = self._finite_values(pooled[col])
             if len(x) == 0:
                 continue
-            dx = np.diff(x)
+
+            # Important: never difference across sequence boundaries. Cross-sequence jumps are
+            # unrelated operating points, not true one-step dynamics.
+            diffs: list[np.ndarray] = []
+            for _, seq_df in all_frames:
+                seq_x = self._finite_values(seq_df[col])
+                if len(seq_x) > 1:
+                    diffs.append(np.diff(seq_x))
+            dx = np.concatenate(diffs) if diffs else np.empty(0, dtype=float)
             dx = dx[np.isfinite(dx)]
+
             q05, q25, q50, q75, q95 = np.quantile(x, [0.05, 0.25, 0.50, 0.75, 0.95])
             variables[col] = {
                 "q05": float(q05),
@@ -85,8 +98,7 @@ class OfficialDomainCalibrator:
         for seq_name, df in all_frames:
             seq_stats: dict[str, dict[str, float]] = {}
             for col in TARGET_COLUMNS:
-                x = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
-                x = x[np.isfinite(x)]
+                x = self._finite_values(df[col])
                 if len(x) == 0:
                     continue
                 q25, q50, q75 = np.quantile(x, [0.25, 0.50, 0.75])
