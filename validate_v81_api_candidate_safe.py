@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import os
 import sys
 
 import torch
@@ -25,14 +26,16 @@ def _shutdown_executor(name: str, executor) -> None:
 
 
 def _cleanup_runtime() -> None:
-    """Tear down validation-only thread/CUDA resources before interpreter exit.
+    """Quiesce validation-only thread/CUDA resources before process exit.
 
-    The candidate validation exercises LightGBM thread pools, XGBoost CUDA and
-    PatchTST CUDA in one short-lived Python process. The actual FastAPI service is
-    long-lived, but during this synthetic validation the interpreter previously
-    received SIGABRT after all gates had already passed while native runtimes were
-    being finalized. Explicitly quiesce executors and CUDA first so the shell sees
-    the real validation exit code rather than a teardown-time abort.
+    The short-lived validator combines LightGBM thread pools, XGBoost CUDA and
+    PyTorch CUDA in one interpreter. All functional gates can pass, yet some native
+    library finalizers may still abort during normal CPython teardown. We therefore
+    clean up explicitly and then let the entry point terminate with os._exit(), which
+    skips CPython/native destructor finalization after all results have been flushed.
+
+    This workaround is only for the synthetic validator. The real FastAPI service is
+    long-lived and is not changed by this file.
     """
     try:
         if torch.cuda.is_available():
@@ -59,7 +62,6 @@ def _cleanup_runtime() -> None:
     except Exception as exc:
         print(f"[CLEANUP] PatchTST clear: {type(exc).__name__}: {exc}")
 
-    # Release Python references while CUDA/runtime libraries are still fully alive.
     for name in (
         "_model_lgb",
         "_model_xgb",
@@ -83,16 +85,20 @@ def _cleanup_runtime() -> None:
         print(f"[CLEANUP] cuda cleanup: {type(exc).__name__}: {exc}")
 
 
-def main() -> int:
+def run_validation() -> int:
     code = 3
     try:
         code = int(validator.main())
-        return code
     finally:
         _cleanup_runtime()
         sys.stdout.flush()
         sys.stderr.flush()
+    return code
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = run_validation()
+    print(f"[CLEANUP] validation process exiting via os._exit({exit_code})")
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)
