@@ -12,7 +12,7 @@ from src.inference import predict_future as predict_future_v8
 from src.deep.patchtst_temperature_runtime import (
     PATCHTST_TEMPERATURE_WEIGHT,
     apply_patchtst_temperature_candidate,
-    load_patchtst_temperature_runtime,
+    warmup_patchtst_temperature_runtime,
 )
 
 
@@ -35,14 +35,19 @@ V81_STRICT_CANDIDATE = os.getenv("V81_STRICT_CANDIDATE", "0").strip().lower() in
 
 
 def preload_v81_models() -> dict[str, Any]:
-    """Preload V8 and the frozen PatchTST temperature candidate.
+    """Preload V8 and fully warm the frozen PatchTST temperature candidate.
 
-    This is deliberately kept outside app.py for now. Importing this module does not
-    alter the verified callback schema or models/ensemble_config.pkl.
+    Loading weights alone is not enough for CUDA request latency: the first real
+    Transformer forward initializes kernels and can be much slower than steady state.
+    Therefore V8.1 startup performs warmup forward passes here, moving that one-time
+    cost out of the first /predict request.
+
+    This remains outside app.py for now and does not alter callback payloads or
+    models/ensemble_config.pkl.
     """
     _, _, _, _, ensemble_config = load_v8_models()
     if V81_TEMPERATURE_ENABLED:
-        load_patchtst_temperature_runtime(V81_PATCHTST_DEVICE)
+        warmup_patchtst_temperature_runtime(V81_PATCHTST_DEVICE, runs=2)
     return ensemble_config
 
 
