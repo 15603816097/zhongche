@@ -10,9 +10,13 @@ from src.trajectory_fusion import endpoint_zero_highpass
 
 _PCA_MODEL = None
 _PCA_PREPROCESS = None
+_ROBUST_PCA_MODEL = None
+_ROBUST_PCA_PREPROCESS = None
 
 PCA_MODEL_PATH = MODEL_DIR / "model_pca_xgb.pkl"
 PCA_PREPROCESS_PATH = MODEL_DIR / "preprocess_pca_xgb.pkl"
+ROBUST_PCA_MODEL_PATH = MODEL_DIR / "model_pca_robust_v15.pkl"
+ROBUST_PCA_PREPROCESS_PATH = MODEL_DIR / "preprocess_pca_robust_v15.pkl"
 
 
 def _as_float_vector(config: Dict, key: str, default: float = 0.0) -> np.ndarray:
@@ -61,6 +65,24 @@ def v8_enabled(config: Dict) -> bool:
     return model_name.startswith("pca_xgb")
 
 
+def v15_enabled(config: Dict) -> bool:
+    if int(config.get("version", 1)) < 15:
+        return False
+    model_name = str(config.get("trajectory_model", "")).strip().lower()
+    if "robust_blend_v15" not in model_name:
+        return False
+    alphas = _as_float_vector(config, "robust_pca_alphas", 0.0)
+    return bool(np.any(alphas > 1e-12))
+
+
+def v15_alphas(config: Dict) -> np.ndarray:
+    return np.clip(
+        _as_float_vector(config, "robust_pca_alphas", 0.0),
+        0.0,
+        1.0,
+    )
+
+
 def v8_parameters(config: Dict) -> Tuple[np.ndarray, np.ndarray, List[str], np.ndarray]:
     """读取 V8 在线融合参数，形状全部严格校验。"""
     weights = np.clip(
@@ -96,6 +118,22 @@ def required_lgb_targets_for_v8(config: Dict) -> List[int]:
     ]
 
 
+def _validate_preprocess(preprocess: Dict, label: str):
+    target_columns = list(preprocess.get("target_columns", []))
+    horizon = int(preprocess.get("horizon", -1))
+    pcas = preprocess.get("pcas")
+
+    if target_columns != list(TARGET_COLUMNS):
+        raise RuntimeError(
+            f"{label} target_columns 不一致: {target_columns} vs {TARGET_COLUMNS}"
+        )
+    if horizon != HORIZON:
+        raise RuntimeError(f"{label} horizon 不一致: {horizon} vs {HORIZON}")
+    if not isinstance(pcas, (list, tuple)) or len(pcas) != len(TARGET_COLUMNS):
+        raise RuntimeError(f"{label} pcas 数量不正确")
+    return pcas
+
+
 def load_pca_runtime():
     global _PCA_MODEL, _PCA_PREPROCESS
 
@@ -111,26 +149,37 @@ def load_pca_runtime():
         with open(PCA_PREPROCESS_PATH, "rb") as f:
             _PCA_PREPROCESS = pickle.load(f)
 
-    target_columns = list(_PCA_PREPROCESS.get("target_columns", []))
-    horizon = int(_PCA_PREPROCESS.get("horizon", -1))
-    pcas = _PCA_PREPROCESS.get("pcas")
-
-    if target_columns != list(TARGET_COLUMNS):
-        raise RuntimeError(
-            f"V8 PCA target_columns 不一致: {target_columns} vs {TARGET_COLUMNS}"
-        )
-    if horizon != HORIZON:
-        raise RuntimeError(f"V8 PCA horizon 不一致: {horizon} vs {HORIZON}")
-    if not isinstance(pcas, (list, tuple)) or len(pcas) != len(TARGET_COLUMNS):
-        raise RuntimeError("V8 PCA pcas 数量不正确")
-
+    _validate_preprocess(_PCA_PREPROCESS, "V8 PCA")
     return _PCA_MODEL, _PCA_PREPROCESS
 
 
+def load_robust_pca_runtime():
+    global _ROBUST_PCA_MODEL, _ROBUST_PCA_PREPROCESS
+
+    if _ROBUST_PCA_MODEL is None:
+        if not ROBUST_PCA_MODEL_PATH.exists():
+            raise FileNotFoundError(f"缺少 V15 robust PCA 模型: {ROBUST_PCA_MODEL_PATH}")
+        with open(ROBUST_PCA_MODEL_PATH, "rb") as f:
+            _ROBUST_PCA_MODEL = pickle.load(f)
+
+    if _ROBUST_PCA_PREPROCESS is None:
+        if not ROBUST_PCA_PREPROCESS_PATH.exists():
+            raise FileNotFoundError(
+                f"缺少 V15 robust PCA 预处理文件: {ROBUST_PCA_PREPROCESS_PATH}"
+            )
+        with open(ROBUST_PCA_PREPROCESS_PATH, "rb") as f:
+            _ROBUST_PCA_PREPROCESS = pickle.load(f)
+
+    _validate_preprocess(_ROBUST_PCA_PREPROCESS, "V15 robust PCA")
+    return _ROBUST_PCA_MODEL, _ROBUST_PCA_PREPROCESS
+
+
 def preload_v8_runtime(config: Dict) -> None:
-    """API 启动时预加载 V8 PCA 模型，避免第一条官网请求承担模型加载时间。"""
+    """API 启动时预加载 PCA 模型，避免第一条官网请求承担模型加载时间。"""
     if v8_enabled(config):
         load_pca_runtime()
+    if v15_enabled(config):
+        load_robust_pca_runtime()
 
 
 def _decode_pca_scores(scores: np.ndarray, pcas: Sequence) -> np.ndarray:
@@ -150,23 +199,20 @@ def _decode_pca_scores(scores: np.ndarray, pcas: Sequence) -> np.ndarray:
         end = offset + k
         if end > scores.shape[1]:
             raise RuntimeError(
-                f"V8 PCA score 维度不足: need={end}, actual={scores.shape[1]}"
+                f"PCA score 维度不足: need={end}, actual={scores.shape[1]}"
             )
         out[:, :, j] = pca.inverse_transform(scores[:, offset:end])
         offset = end
 
     if offset != scores.shape[1]:
         raise RuntimeError(
-            f"V8 PCA score 维度不一致: used={offset}, actual={scores.shape[1]}"
+            f"PCA score 维度不一致: used={offset}, actual={scores.shape[1]}"
         )
 
     return out
 
 
-def predict_pca_trajectory(features: np.ndarray, last_values: np.ndarray):
-    started = time.perf_counter()
-    model, preprocess = load_pca_runtime()
-
+def _predict_pca_pack(model, preprocess, features, last_values):
     scaler_X = preprocess["scaler_X"]
     scaler_y = preprocess["scaler_y"]
     pcas = preprocess["pcas"]
@@ -179,8 +225,20 @@ def predict_pca_trajectory(features: np.ndarray, last_values: np.ndarray):
     pred_scores = scaler_y.inverse_transform(pred_scaled)
     pred_delta = _decode_pca_scores(pred_scores, pcas)[0]
     last = np.asarray(last_values, dtype=np.float64).reshape(1, -1)
-    pred_abs = pred_delta + last
+    return pred_delta + last
 
+
+def predict_pca_trajectory(features: np.ndarray, last_values: np.ndarray):
+    started = time.perf_counter()
+    model, preprocess = load_pca_runtime()
+    pred_abs = _predict_pca_pack(model, preprocess, features, last_values)
+    return pred_abs, time.perf_counter() - started
+
+
+def predict_robust_pca_trajectory(features: np.ndarray, last_values: np.ndarray):
+    started = time.perf_counter()
+    model, preprocess = load_robust_pca_runtime()
+    pred_abs = _predict_pca_pack(model, preprocess, features, last_values)
     return pred_abs, time.perf_counter() - started
 
 
@@ -193,12 +251,15 @@ def apply_v8_runtime(
     config: Dict,
 ):
     """
-    在线复现 V8 离线公式：
+    V8 在线公式：
       low_rank = (1-w)*V3 + w*PCA
       final    = low_rank + gamma*HighPass(source)
 
-    source 可逐变量选择 V3 / LGB / XGB，高通残差与离线搜索使用同一
-    endpoint_zero_highpass() 实现，确保候选验证和官网推理公式一致。
+    V15 只替换 PCA 低频项：
+      PCA* = (1-alpha)*clean_PCA + alpha*robust_PCA
+
+    V8 的 V3/LGB/XGB 高频来源、窗口和 gain 完全保持不变，因此 callback/API
+    无需任何改动；V15 只是低频 PCA 分支的保守增强。
     """
     if not v8_enabled(config):
         return np.asarray(pred_v3, dtype=np.float64), 0.0, 0
@@ -206,13 +267,25 @@ def apply_v8_runtime(
     weights, gains, sources, windows = v8_parameters(config)
     pca_pred, pca_seconds = predict_pca_trajectory(features, last_values)
 
+    if v15_enabled(config):
+        robust_pred, robust_seconds = predict_robust_pca_trajectory(
+            features,
+            last_values,
+        )
+        alphas = v15_alphas(config)
+        pca_pred = (
+            (1.0 - alphas.reshape(1, -1)) * pca_pred
+            + alphas.reshape(1, -1) * robust_pred
+        )
+        pca_seconds += robust_seconds
+
     pred_v3 = np.asarray(pred_v3, dtype=np.float64)
     pred_lgb = np.asarray(pred_lgb, dtype=np.float64)
     pred_xgb = np.asarray(pred_xgb, dtype=np.float64)
 
     if pca_pred.shape != pred_v3.shape:
         raise RuntimeError(
-            f"V8 PCA 输出 shape 不一致: {pca_pred.shape} vs {pred_v3.shape}"
+            f"PCA 输出 shape 不一致: {pca_pred.shape} vs {pred_v3.shape}"
         )
 
     source_map = {
