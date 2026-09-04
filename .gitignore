@@ -1,0 +1,8 @@
+# Local/private large datasets and generated preprocessing outputs
+external_data/
+logs/
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
