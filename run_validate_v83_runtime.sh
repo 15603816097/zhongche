@@ -4,24 +4,27 @@ set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p logs models
 
-printf '\n[1/5] Check V8.3 candidate output...\n'
-[ -f models/v83_final_candidate.json ] || {
-  echo 'missing models/v83_final_candidate.json; run bash run_v83_final_sprint.sh first'
+printf '\n[1/5] Check V8.3 safe candidate output...\n'
+[ -f models/v83_final_safe_candidate.json ] || {
+  echo 'missing models/v83_final_safe_candidate.json; run bash run_v83_safe_shrink.sh first'
   exit 1
 }
 
-printf '\n[2/5] Confirm candidate PASS...\n'
+printf '\n[2/5] Confirm safe candidate PASS...\n'
 python - <<'PY'
 import json
 from pathlib import Path
-p = Path('models/v83_final_candidate.json')
+p = Path('models/v83_final_safe_candidate.json')
 d = json.loads(p.read_text(encoding='utf-8'))
 print('offline_gate_pass :', d.get('offline_gate_pass'))
 print('enabled_targets   :', d.get('enabled_targets'))
 print('global_rmse_ratio :', d.get('global_rmse_ratio'))
 print('proxy_gain_pct    :', d.get('global_proxy_gain_pct'))
+for name in d.get('enabled_targets', []):
+    item = d['targets'][name]
+    print(f"  {name:16s} runtime_scale={item.get('runtime_scale')}")
 if not d.get('offline_gate_pass'):
-    raise SystemExit('candidate is not PASS')
+    raise SystemExit('safe candidate is not PASS')
 PY
 
 printf '\n[3/5] Syntax/import check...\n'
