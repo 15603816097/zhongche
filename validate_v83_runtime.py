@@ -17,7 +17,7 @@ from v83_final_sprint_diagnostic import apply_params
 
 ROOT = Path(__file__).resolve().parent
 CORPUS_PATH = ROOT / "external_data" / "corpus" / "official_finetune_v1.npz"
-CANDIDATE_PATH = ROOT / "models" / "v83_final_candidate.json"
+CANDIDATE_PATH = ROOT / "models" / "v83_final_safe_candidate.json"
 
 
 def rmse(a: np.ndarray, b: np.ndarray) -> float:
@@ -43,7 +43,7 @@ def main() -> int:
 
     cfg = json.loads(CANDIDATE_PATH.read_text(encoding="utf-8"))
     if not bool(cfg.get("offline_gate_pass", False)):
-        raise RuntimeError("candidate offline gate is not PASS")
+        raise RuntimeError("safe candidate offline gate is not PASS")
 
     with open(MODEL_DIR / "ensemble_config.pkl", "rb") as f:
         ensemble = pickle.load(f)
@@ -51,7 +51,7 @@ def main() -> int:
         raise RuntimeError(f"expected V8 ensemble, got {ensemble.get('version')}")
 
     print("=" * 108)
-    print("V8.3 STRICT RUNTIME PARITY VALIDATION")
+    print("V8.3 SAFE STRICT RUNTIME PARITY VALIDATION")
     print("=" * 108)
     print(f"enabled targets      : {cfg['enabled_targets']}")
     print(f"offline rmse ratio   : {float(cfg['global_rmse_ratio']):.6f}")
@@ -92,7 +92,8 @@ def main() -> int:
         expected = base.copy()
         for name in cfg["enabled_targets"]:
             j = TARGET_COLUMNS.index(name)
-            c = cfg["targets"][name]["consensus"]
+            item = cfg["targets"][name]
+            c = item["consensus"]
             params = (
                 float(c["pattern_weight"]),
                 float(c["trend_weight"]),
@@ -100,9 +101,11 @@ def main() -> int:
                 float(c["amplitude_gain"]),
                 int(c["highpass_window"]),
             )
-            expected[:, j] = apply_params(
+            full = apply_params(
                 base[:, j], pattern[:, j], trend[:, j], float(anchor[j]), params
             )
+            alpha = float(item.get("runtime_scale", 1.0))
+            expected[:, j] = base[:, j] + alpha * (full - base[:, j])
 
         parity = float(np.max(np.abs(runtime - expected)))
         acoustic_change = float(np.max(np.abs(runtime[:, acoustic_idx] - base[:, acoustic_idx])))
