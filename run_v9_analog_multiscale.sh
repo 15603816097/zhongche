@@ -37,7 +37,7 @@ done
 ls -lh models/model_lgb.pkl models/model_xgb.pkl models/model_pca_xgb.pkl models/ensemble_config.pkl
 
 echo
-echo "[3/5] Verify production V8 is still alive (no modification)..."
+echo "[3/5] Verify production V8 service is still alive (no modification)..."
 python - <<'PY'
 import json
 import urllib.request
@@ -52,8 +52,8 @@ except Exception as e:
 PY
 
 echo
-echo "[4/5] Syntax check..."
-python -m py_compile v9_analog_multiscale_diagnostic.py
+echo "[4/5] Syntax + V8 config check..."
+python -m py_compile v9_analog_multiscale_diagnostic.py v9_cpu_launcher.py
 python - <<'PY'
 import pickle
 from pathlib import Path
@@ -68,7 +68,10 @@ PY
 
 echo
 echo "[5/5] Run V9 official-only multiscale analog diagnostic..."
-PYTHONUNBUFFERED=1 python v9_analog_multiscale_diagnostic.py | tee v9_analog_multiscale.log
+echo "NOTE: this server GPU cannot execute the current XGBoost CUDA wheel."
+echo "      Offline V9 therefore runs the exact same V8 weights on CPU only."
+echo "      Production 8800 is not modified by this diagnostic."
+XGB_DEVICE=cpu PYTHONUNBUFFERED=1 python v9_cpu_launcher.py | tee v9_analog_multiscale.log
 
 echo
 echo "Done."
