@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import requests
 
+from src.data_cleaner import clean_sequence
 from v9_analog_multiscale_diagnostic import evaluate_rows, proxy_gain
 
 TARGETS = [
@@ -23,6 +24,15 @@ UNTOUCHED = [
     TARGETS.index("speed_rpm"),
     TARGETS.index("acoustic_db"),
 ]
+
+
+def json_safe_float(value):
+    """Convert CSV values to strict JSON values; NaN/Inf become null."""
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return None
+    return x if np.isfinite(x) else None
 
 
 def call_api(port: int, payload: dict):
@@ -74,10 +84,14 @@ def main() -> int:
         hdf = pd.read_csv(f"data/raw/{name}/history.csv")
         fdf = pd.read_csv(f"data/raw/{name}/future.csv")
 
+        missing_history_values = int(
+            (~np.isfinite(hdf[TARGETS].to_numpy(dtype=np.float64))).sum()
+        )
+
         history = [
             {
                 "step": i,
-                "values": {c: float(row[c]) for c in TARGETS},
+                "values": {c: json_safe_float(row[c]) for c in TARGETS},
             }
             for i, row in hdf.iterrows()
         ]
@@ -92,19 +106,35 @@ def main() -> int:
         p8, t8 = call_api(8800, payload)
         p9, t9 = call_api(8801, payload)
 
-        untouched_diff = float(np.max(np.abs(p9[:, UNTOUCHED] - p8[:, UNTOUCHED])))
+        untouched_diff = float(
+            np.max(np.abs(p9[:, UNTOUCHED] - p8[:, UNTOUCHED]))
+        )
         if untouched_diff >= 1e-9:
-            raise RuntimeError(f"{name}: untouched targets changed: {untouched_diff}")
+            raise RuntimeError(
+                f"{name}: untouched targets changed: {untouched_diff}"
+            )
 
         print(
             f"{name} | V8={t8:.3f}s V9={t9:.3f}s "
-            f"extra={t9 - t8:+.3f}s untouched_diff={untouched_diff:.12f}"
+            f"extra={t9 - t8:+.3f}s "
+            f"untouched_diff={untouched_diff:.12f} "
+            f"json_nulls={missing_history_values}"
         )
 
-        truth_rows.append(fdf[TARGETS].iloc[:96].to_numpy(dtype=np.float64))
+        # Match API-side preprocessing for the anchor used in trend metrics.
+        hdf_clean = clean_sequence(hdf[TARGETS])
+        anchor = hdf_clean[TARGETS].iloc[-1].to_numpy(dtype=np.float64)
+
+        truth = fdf[TARGETS].iloc[:96].to_numpy(dtype=np.float64)
+        if truth.shape != (96, 6):
+            raise RuntimeError(f"{name}: future shape={truth.shape}")
+        if not np.isfinite(truth).all():
+            raise RuntimeError(f"{name}: future.csv contains NaN/Inf")
+
+        truth_rows.append(truth)
         v8_rows.append(p8)
         v9_rows.append(p9)
-        anchors.append(hdf[TARGETS].iloc[-1].to_numpy(dtype=np.float64))
+        anchors.append(anchor)
         times_v8.append(t8)
         times_v9.append(t9)
 
@@ -123,8 +153,16 @@ def main() -> int:
     proxy8 = []
     proxy9 = []
     for j, name in enumerate(TARGETS):
-        b = evaluate_rows(truth[:, :, j], v8[:, :, j], anchors_arr[:, j])
-        c = evaluate_rows(truth[:, :, j], v9[:, :, j], anchors_arr[:, j])
+        b = evaluate_rows(
+            truth[:, :, j],
+            v8[:, :, j],
+            anchors_arr[:, j],
+        )
+        c = evaluate_rows(
+            truth[:, :, j],
+            v9[:, :, j],
+            anchors_arr[:, j],
+        )
         ratio = float(c["rmse"] / max(b["rmse"], 1e-12))
         gain = float(proxy_gain(b, c))
         trend_gain = float(c["trend_core"] - b["trend_core"])
@@ -132,7 +170,8 @@ def main() -> int:
         proxy9.append(float(c["proxy_loss"]))
         print(
             f"{name:16s} rmse_ratio={ratio:.6f} "
-            f"proxy_gain={100 * gain:+.2f}% trend_gain={trend_gain:+.4f}"
+            f"proxy_gain={100 * gain:+.2f}% "
+            f"trend_gain={trend_gain:+.4f}"
         )
 
     mean_proxy8 = float(np.mean(proxy8))
@@ -152,7 +191,10 @@ def main() -> int:
     print(f"mean proxy gain     : {100 * mean_proxy_gain:+.2f}%")
     print(f"mean V8 time        : {np.mean(times_v8):.3f}s")
     print(f"mean V9-Safe time   : {np.mean(times_v9):.3f}s")
-    print(f"mean extra time     : {np.mean(times_v9) - np.mean(times_v8):+.3f}s")
+    print(
+        f"mean extra time     : "
+        f"{np.mean(times_v9) - np.mean(times_v8):+.3f}s"
+    )
 
     if not (rmse9 < rmse8):
         raise SystemExit("FAIL: V9-Safe flat RMSE did not improve")
