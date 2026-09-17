@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 DEPLOY_MODELS="${V8_DEPLOY_MODELS:-/root/rail_forecast_v8_deploy/models}"
+V9_XGB_DEVICE="${V9_XGB_DEVICE:-cuda}"
 
 REQUIRED=(
   model_lgb.pkl
@@ -68,10 +69,14 @@ PY
 
 echo
 echo "[5/5] Run V9 official-only multiscale analog diagnostic..."
-echo "NOTE: this server GPU cannot execute the current XGBoost CUDA wheel."
-echo "      Offline V9 therefore runs the exact same V8 weights on CPU only."
-echo "      Production 8800 is not modified by this diagnostic."
-XGB_DEVICE=cpu PYTHONUNBUFFERED=1 python v9_cpu_launcher.py | tee v9_analog_multiscale.log
+echo "XGBoost device     : ${V9_XGB_DEVICE}"
+echo "Production 8800    : untouched"
+
+if [ "${V9_XGB_DEVICE}" = "cpu" ]; then
+  XGB_DEVICE=cpu PYTHONUNBUFFERED=1 python v9_cpu_launcher.py | tee v9_analog_multiscale.log
+else
+  XGB_DEVICE="${V9_XGB_DEVICE}" PYTHONUNBUFFERED=1 python v9_analog_multiscale_diagnostic.py | tee v9_analog_multiscale.log
+fi
 
 echo
 echo "Done."
