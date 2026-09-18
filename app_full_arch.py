@@ -11,7 +11,7 @@ from src.full_arch_runtime import (
 )
 
 base_app.APP_NAME = "Rail Transit Time-Series Forecast API - Full Architecture"
-base_app.APP_VERSION = "3.0.1-full-arch"
+base_app.APP_VERSION = "3.0.0-full-arch"
 base_app.predict_future = predict_future_full_arch
 
 app = base_app.app
