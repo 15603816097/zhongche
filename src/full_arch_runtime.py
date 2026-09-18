@@ -28,7 +28,7 @@ from full_arch_stage4_confidence_ood import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-GATE_CONFIG_PATH = MODEL_DIR / "full_arch" / "dynamic_gate_config.json"
+FROZEN_GATE_CONFIG_PATH = ROOT / "full_arch_frozen_gate_v1.json"\nGENERATED_GATE_CONFIG_PATH = MODEL_DIR / "full_arch" / "dynamic_gate_config.json"\nGATE_CONFIG_PATH = (\n    FROZEN_GATE_CONFIG_PATH\n    if FROZEN_GATE_CONFIG_PATH.is_file()\n    else GENERATED_GATE_CONFIG_PATH\n)
 
 _LOCK = threading.Lock()
 _READY = False
@@ -342,7 +342,7 @@ def predict_future(
     result = dict(timings)
     result["full_arch_gate"] = gate_info["gate_seconds"]
     result["total"] = float(time.perf_counter() - total_started)
-    result["candidate"] = "full_arch_dynamic_gate_v1"
+    result["candidate"] = str(_CONFIG.get("candidate_name", "full_arch_dynamic_gate_v1")) if _CONFIG else "full_arch_dynamic_gate_v1"
     result["enabled_targets"] = list(_CONFIG.get("enabled_targets", [])) if _CONFIG else []
     result["gate_detail"] = gate_info["targets"]
     return pred, result
