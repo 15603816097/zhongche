@@ -24,13 +24,23 @@ if command -v python3.12 >/dev/null 2>&1; then
   PY="$(command -v python3.12)"
 fi
 
+USE_CONDA=0
 if [ -n "$PY" ]; then
   echo "[2/5] Create Python 3.12 virtual environment..."
   rm -rf .runtime
-  "$PY" -m venv .runtime
-  RPY="$ROOT/.runtime/bin/python"
+  if "$PY" -m venv .runtime; then
+    RPY="$ROOT/.runtime/bin/python"
+  else
+    echo "python3.12 venv unavailable; falling back to local Miniconda..."
+    rm -rf .runtime
+    USE_CONDA=1
+  fi
 else
-  echo "[2/5] Python 3.12 not found; bootstrap local Miniconda..."
+  USE_CONDA=1
+fi
+
+if [ "$USE_CONDA" -eq 1 ]; then
+  echo "[2/5] Bootstrap local Miniconda with Python 3.12..."
   ARCH="$(uname -m)"
   case "$ARCH" in
     x86_64|amd64) CONDA_ARCH="x86_64" ;;
