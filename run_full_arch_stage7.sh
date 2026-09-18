@@ -7,6 +7,7 @@ API_PORT=8810
 LOG_DIR="artifacts/full_arch/runtime"
 LOG_FILE="$LOG_DIR/full_arch_api_stage7.log"
 PID_FILE="$LOG_DIR/full_arch_api_stage7.pid"
+HEALTH_FILE="/tmp/full_arch_stage7_health.json"
 
 if [ ! -x "$PY" ]; then
   echo "missing .venv-full; run Stage 1 first" >&2
@@ -18,6 +19,7 @@ if [ ! -f models/full_arch/dynamic_gate_config.json ]; then
 fi
 
 mkdir -p "$LOG_DIR"
+rm -f "$HEALTH_FILE"
 
 if ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]$API_PORT$"; then
   echo "port $API_PORT is already in use; refusing to kill an unknown process" >&2
@@ -66,12 +68,34 @@ nohup "$PY" -m uvicorn app_full_arch:app \
 
 echo $! > "$PID_FILE"
 
+# Do not depend on curl being installed. Use the project Python environment
+# and requests, which Stage 1 explicitly installs.
 ready=0
-for _ in $(seq 1 120); do
-  if curl -fsS "http://127.0.0.1:$API_PORT/health" >/tmp/full_arch_stage7_health.json 2>/dev/null; then
+for _ in $(seq 1 180); do
+  if "$PY" - "$API_PORT" "$HEALTH_FILE" <<'PY'
+import json
+import sys
+import requests
+
+port = int(sys.argv[1])
+path = sys.argv[2]
+try:
+    r = requests.get(f"http://127.0.0.1:{port}/health", timeout=1.0)
+    if r.status_code != 200:
+        raise SystemExit(1)
+    data = r.json()
+    if data.get("status") != "ok":
+        raise SystemExit(1)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+except Exception:
+    raise SystemExit(1)
+PY
+  then
     ready=1
     break
   fi
+
   if ! kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     echo "API process exited during startup" >&2
     tail -n 100 "$LOG_FILE" >&2 || true
@@ -82,14 +106,21 @@ done
 
 if [ "$ready" -ne 1 ]; then
   echo "API did not become healthy in time" >&2
+  echo "[port state]" >&2
+  ss -ltnp 2>/dev/null | grep -E "[:.]$API_PORT\b" >&2 || true
+  echo "[last API log lines]" >&2
   tail -n 100 "$LOG_FILE" >&2 || true
   exit 2
 fi
 
 echo
 echo "[health]"
-cat /tmp/full_arch_stage7_health.json
-echo
+"$PY" - "$HEALTH_FILE" <<'PY'
+import json
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    print(json.dumps(json.load(f), ensure_ascii=False, indent=2))
+PY
 echo
 
 "$PY" test_full_arch_stage7_callback_stress.py
