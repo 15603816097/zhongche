@@ -21,15 +21,26 @@ if [ ! -x "$PY" ]; then
   exit 2
 fi
 
-# Models and official five sequences are intentionally reused read-only from
-# the validated production workspace. The experimental source tree stays
-# isolated from production.
-if [ ! -e "$ROOT/models" ]; then
-  ln -s "$SOURCE_ROOT/models" "$ROOT/models"
-fi
+# Official data are reused read-only. Models are linked file-by-file into a
+# local models directory so experimental artifacts never land in production.
 if [ ! -e "$ROOT/data" ]; then
   ln -s "$SOURCE_ROOT/data" "$ROOT/data"
 fi
+
+mkdir -p "$ROOT/models"
+for name in \
+  model_lgb.pkl \
+  scaler.pkl \
+  model_xgb.pkl \
+  scaler_xgb.pkl \
+  ensemble_config.pkl \
+  model_pca_xgb.pkl \
+  preprocess_pca_xgb.pkl
+do
+  if [ ! -e "$ROOT/models/$name" ]; then
+    ln -s "$SOURCE_ROOT/models/$name" "$ROOT/models/$name"
+  fi
+done
 
 if [ ! -f "$ROOT/full_arch_frozen_gate_v1.json" ]; then
   echo "missing full_arch_frozen_gate_v1.json; wrong branch?" >&2
