@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 # Import the already validated official API implementation, then replace only
-# the prediction function. Request/callback protocol remains byte-for-byte the
-# same as the V8 service.
+# the prediction function. Request/callback protocol remains unchanged.
 import app as base_app
 
 from src.inference import predict_future as predict_v8
@@ -34,7 +33,7 @@ base_app.predict_future = predict_future_msf
 base_app.APP_VERSION = MSF_VERSION
 base_app.app.version = MSF_VERSION
 
-# Add MSF metadata to health without touching the validated request protocol.
+# Keep a direct reference to the original health function before route surgery.
 _original_health = base_app.health
 
 
@@ -49,10 +48,20 @@ def _health_msf():
     return body
 
 
-# Replace the existing /health endpoint function object in FastAPI routes.
-for route in base_app.app.routes:
-    if getattr(route, "path", None) == "/health":
-        route.endpoint = _health_msf
-        break
+# FastAPI/Starlette builds a request handler when a route is registered.
+# Replacing route.endpoint alone does NOT rebuild that handler, so the old
+# /health function can still be served. Remove the old route and register a
+# fresh one instead.
+base_app.app.router.routes = [
+    route
+    for route in base_app.app.router.routes
+    if getattr(route, "path", None) != "/health"
+]
+base_app.app.add_api_route(
+    "/health",
+    _health_msf,
+    methods=["GET"],
+    name="health_msf",
+)
 
 app = base_app.app
