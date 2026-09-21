@@ -94,8 +94,50 @@ done
 echo "model pack: READY"
 
 echo
-echo "[2/7] Verify active ensemble is exact V8..."
-python3 - <<'PY'
+echo "[2/7] Prepare isolated Python 3.12 environment..."
+if [ ! -x "$PY" ]; then
+  if command -v python3.12 >/dev/null 2>&1; then
+    if ! python3.12 -m venv "$VENV"; then
+      rm -rf "$VENV"
+    fi
+  fi
+fi
+
+if [ ! -x "$PY" ]; then
+  ARCH="$(uname -m)"
+  case "$ARCH" in
+    x86_64|amd64) CONDA_ARCH="x86_64" ;;
+    aarch64|arm64) CONDA_ARCH="aarch64" ;;
+    *) echo "unsupported architecture: $ARCH" >&2; exit 2 ;;
+  esac
+
+  MINICONDA="$ROOT/.miniconda-v8"
+  INSTALLER="/tmp/miniconda-v8-$.sh"
+  URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-${CONDA_ARCH}.sh"
+
+  if [ ! -x "$MINICONDA/bin/conda" ]; then
+    if command -v curl >/dev/null 2>&1; then
+      curl -fL "$URL" -o "$INSTALLER"
+    elif command -v wget >/dev/null 2>&1; then
+      wget -O "$INSTALLER" "$URL"
+    else
+      echo "curl or wget is required to bootstrap Miniconda." >&2
+      exit 2
+    fi
+    bash "$INSTALLER" -b -p "$MINICONDA"
+    rm -f "$INSTALLER"
+  fi
+  "$MINICONDA/bin/conda" create -y -p "$VENV" python=3.12.7 pip
+fi
+
+"$PY" -m pip install -q --upgrade pip setuptools wheel
+"$PY" -m pip install -q -r requirements.v8.runtime.lock.txt
+echo "python: $("$PY" --version)"
+echo "runtime env: READY"
+
+echo
+echo "[3/7] Verify active ensemble is exact V8..."
+"$PY" - <<'PY'
 import pickle
 from pathlib import Path
 p=Path("models/ensemble_config.pkl")
@@ -109,21 +151,6 @@ if str(c.get("trajectory_model","")) != "pca_xgb_source_aware_hf_v1":
     raise SystemExit("unexpected trajectory_model")
 print("V8 config: PASS")
 PY
-
-echo
-echo "[3/7] Prepare isolated Python environment..."
-if [ ! -x "$PY" ]; then
-  if ! command -v python3.12 >/dev/null 2>&1; then
-    echo "python3.12 is required on this server." >&2
-    echo "Install Python 3.12 first, then rerun this script." >&2
-    exit 2
-  fi
-  python3.12 -m venv "$VENV"
-fi
-"$PY" -m pip install -q --upgrade pip setuptools wheel
-"$PY" -m pip install -q -r requirements.v8.runtime.lock.txt
-echo "python: $("$PY" --version)"
-echo "runtime env: READY"
 
 echo
 echo "[4/7] Stop any current listener on $PORT..."
