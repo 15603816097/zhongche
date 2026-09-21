@@ -1,3 +1,4 @@
+import os
 import pickle
 import time
 from typing import Dict, List, Sequence, Tuple
@@ -17,6 +18,30 @@ PCA_MODEL_PATH = MODEL_DIR / "model_pca_xgb.pkl"
 PCA_PREPROCESS_PATH = MODEL_DIR / "preprocess_pca_xgb.pkl"
 ROBUST_PCA_MODEL_PATH = MODEL_DIR / "model_pca_robust_v15.pkl"
 ROBUST_PCA_PREPROCESS_PATH = MODEL_DIR / "preprocess_pca_robust_v15.pkl"
+
+PCA_XGB_INFER_THREADS = max(
+    0,
+    int(
+        os.getenv(
+            "PCA_XGB_INFER_THREADS",
+            os.getenv("XGB_INFER_THREADS", "0"),
+        )
+    ),
+)
+
+
+def _set_xgb_threads(model, n_threads: int) -> None:
+    if n_threads <= 0 or model is None:
+        return
+    try:
+        model.set_params(n_jobs=n_threads)
+    except Exception:
+        pass
+    try:
+        booster = model.get_booster()
+        booster.set_param({"nthread": int(n_threads)})
+    except Exception:
+        pass
 
 
 def _as_float_vector(config: Dict, key: str, default: float = 0.0) -> np.ndarray:
@@ -142,6 +167,7 @@ def load_pca_runtime():
             raise FileNotFoundError(f"缺少 V8 PCA 模型: {PCA_MODEL_PATH}")
         with open(PCA_MODEL_PATH, "rb") as f:
             _PCA_MODEL = pickle.load(f)
+        _set_xgb_threads(_PCA_MODEL, PCA_XGB_INFER_THREADS)
 
     if _PCA_PREPROCESS is None:
         if not PCA_PREPROCESS_PATH.exists():
@@ -161,6 +187,7 @@ def load_robust_pca_runtime():
             raise FileNotFoundError(f"缺少 V15 robust PCA 模型: {ROBUST_PCA_MODEL_PATH}")
         with open(ROBUST_PCA_MODEL_PATH, "rb") as f:
             _ROBUST_PCA_MODEL = pickle.load(f)
+        _set_xgb_threads(_ROBUST_PCA_MODEL, PCA_XGB_INFER_THREADS)
 
     if _ROBUST_PCA_PREPROCESS is None:
         if not ROBUST_PCA_PREPROCESS_PATH.exists():
