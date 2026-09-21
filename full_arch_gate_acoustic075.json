@@ -1,0 +1,97 @@
+{
+  "version": "full_arch_gate_v1_acoustic075",
+  "candidate_name": "fa52_acoustic075_v1",
+  "frozen": true,
+  "base_model": "V8",
+  "selected_from_stage5_commit": "cd8432d5f3cbd7c5e9264b21747fe685aa2233ee",
+  "segments": [[0, 32], [32, 64], [64, 96]],
+  "weight_formula": "alpha * confidence * (1-combined_ood)^ood_power",
+  "deep_policy": "TCN/PatchTST direct forecast weights are zero because Stage 3 LOSO rejected them.",
+  "enabled_targets": ["speed_rpm", "acoustic_db", "pressure_kpa"],
+  "global_gate_pass": true,
+  "shrink_scales": {
+    "speed_rpm": 1.0,
+    "acoustic_db": 0.75,
+    "pressure_kpa": 1.0
+  },
+  "offline_reference": {
+    "flat_rmse_v8": 8.072473,
+    "flat_rmse_full_arch": 7.801844,
+    "flat_rmse_candidate": 7.802005,
+    "rmse_ratio_to_full_arch": 1.000021,
+    "proxy_ratio_to_full_arch": 1.002250,
+    "trend_vs_full_arch": -0.000118,
+    "max_sequence_rmse_ratio_to_full_arch": 1.000046
+  },
+  "targets": {
+    "vibration_rms": {
+      "enabled": false,
+      "reason": "exact V8 fallback"
+    },
+    "temperature_c": {
+      "enabled": false,
+      "reason": "exact V8 fallback"
+    },
+    "current_a": {
+      "enabled": false,
+      "reason": "exact V8 fallback"
+    },
+    "speed_rpm": {
+      "enabled": true,
+      "segments": [
+        {
+          "segment": [0, 32],
+          "enabled": true,
+          "analog_config": {"context": 144, "k": 8, "mode": "target", "self_guard": 32},
+          "alpha": 0.2,
+          "ood_power": 1.0
+        },
+        {
+          "segment": [32, 64],
+          "enabled": true,
+          "analog_config": {"context": 48, "k": 8, "mode": "multi", "self_guard": 32},
+          "alpha": 0.2,
+          "ood_power": 1.0
+        },
+        {
+          "segment": [64, 96],
+          "enabled": true,
+          "analog_config": {"context": 48, "k": 8, "mode": "multi", "self_guard": 32},
+          "alpha": 0.1,
+          "ood_power": 1.0
+        }
+      ]
+    },
+    "acoustic_db": {
+      "enabled": true,
+      "segments": [
+        {
+          "segment": [0, 32],
+          "enabled": true,
+          "analog_config": {"context": 96, "k": 3, "mode": "target", "self_guard": 96},
+          "alpha": 0.15,
+          "ood_power": 1.0
+        }
+      ]
+    },
+    "pressure_kpa": {
+      "enabled": true,
+      "segments": [
+        {
+          "segment": [0, 32],
+          "enabled": true,
+          "analog_config": {"context": 48, "k": 3, "mode": "multi", "self_guard": 64},
+          "alpha": 0.2,
+          "ood_power": 1.0
+        },
+        {
+          "segment": [32, 64],
+          "enabled": true,
+          "analog_config": {"context": 144, "k": 5, "mode": "target", "self_guard": 64},
+          "alpha": 0.2,
+          "ood_power": 1.0
+        }
+      ]
+    }
+  }
+}
