@@ -51,6 +51,7 @@ _CONFIG: Dict | None = None
 _HISTORIES: List[np.ndarray] | None = None
 _BANKS: Dict[tuple, tuple] = {}
 _CALIBRATIONS: Dict[tuple, dict] = {}
+_REGIME_REFERENCES: Dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 
 
 def _load_clean_histories() -> List[np.ndarray]:
@@ -96,7 +97,40 @@ def _detect_known_source(query_h: np.ndarray, histories: Sequence[np.ndarray]) -
     return None
 
 
+def _build_regime_reference(
+    histories: Sequence[np.ndarray],
+    target_idx: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    levels = []
+    vols = []
+    slopes = []
+    for h in histories:
+        x = h[:, target_idx]
+        for end in range(48, len(x) - HORIZON + 1, ROLLING_STRIDE):
+            seg = x[end - 48:end]
+            levels.append(float(np.median(seg)))
+            vols.append(
+                float(np.std(np.diff(seg))) if len(seg) > 2 else 0.0
+            )
+            slopes.append(
+                float((seg[-1] - seg[0]) / max(len(seg) - 1, 1))
+            )
+    return (
+        np.asarray(levels, dtype=np.float64),
+        np.asarray(vols, dtype=np.float64),
+        np.asarray(slopes, dtype=np.float64),
+    )
+
+
 def _build_required_runtime_state(config: Dict, histories: Sequence[np.ndarray]) -> None:
+    for target_idx, target in enumerate(TARGET_COLUMNS):
+        tcfg = config.get("targets", {}).get(target, {})
+        if tcfg.get("enabled", False) and target_idx not in _REGIME_REFERENCES:
+            _REGIME_REFERENCES[target_idx] = _build_regime_reference(
+                histories,
+                target_idx,
+            )
+
     for target_idx, target in enumerate(TARGET_COLUMNS):
         tcfg = config.get("targets", {}).get(target, {})
         if not tcfg.get("enabled", False):
@@ -137,29 +171,32 @@ def preload_full_arch_runtime() -> None:
         _READY = True
 
 
-def _regime_ood(query_h: np.ndarray, target_idx: int, refs: Sequence[np.ndarray]) -> float:
+def _regime_ood(
+    query_h: np.ndarray,
+    target_idx: int,
+    refs: Sequence[np.ndarray],
+) -> float:
     q = query_h[:, target_idx]
     recent = q[-48:]
     q_level = float(np.median(recent))
     q_vol = float(np.std(np.diff(recent))) if len(recent) > 2 else 0.0
     q_slope = float((recent[-1] - recent[0]) / max(len(recent) - 1, 1))
 
-    levels = []
-    vols = []
-    slopes = []
-    for h in refs:
-        x = h[:, target_idx]
-        for end in range(48, len(x) - HORIZON + 1, ROLLING_STRIDE):
-            seg = x[end - 48:end]
-            levels.append(float(np.median(seg)))
-            vols.append(float(np.std(np.diff(seg))) if len(seg) > 2 else 0.0)
-            slopes.append(float((seg[-1] - seg[0]) / max(len(seg) - 1, 1)))
+    cached = _REGIME_REFERENCES.get(target_idx)
+    if cached is None:
+        cached = _build_regime_reference(refs, target_idx)
+        _REGIME_REFERENCES[target_idx] = cached
+    levels, vols, slopes = cached
 
     def robust_z(value: float, reference) -> float:
         ref = np.asarray(reference, dtype=np.float64)
         med = float(np.median(ref))
         q25, q75 = np.quantile(ref, [0.25, 0.75])
-        sigma = max(float((q75 - q25) / 1.349), float(np.std(ref)) * 0.25, 1e-6)
+        sigma = max(
+            float((q75 - q25) / 1.349),
+            float(np.std(ref)) * 0.25,
+            1e-6,
+        )
         return float(abs(value - med) / sigma)
 
     level_z = robust_z(q_level, levels)
@@ -175,7 +212,6 @@ def _regime_ood(query_h: np.ndarray, target_idx: int, refs: Sequence[np.ndarray]
         )
     )
 
-
 def _analog_with_confidence(
     query_h: np.ndarray,
     target_idx: int,
@@ -183,6 +219,7 @@ def _analog_with_confidence(
     bank,
     calibration: dict,
     histories: Sequence[np.ndarray],
+    regime_value: float | None = None,
 ) -> tuple[np.ndarray, float, float]:
     descs, deltas, src_ids, future_ends = bank
     query_ctx = query_h[-cfg.context:]
@@ -251,8 +288,14 @@ def _analog_with_confidence(
         )
     )
 
-    regime = _regime_ood(query_h, target_idx, histories)
-    combined_ood = float(np.clip(0.65 * distance_ood + 0.35 * regime, 0.0, 1.0))
+    regime = (
+        _regime_ood(query_h, target_idx, histories)
+        if regime_value is None
+        else float(regime_value)
+    )
+    combined_ood = float(
+        np.clip(0.65 * distance_ood + 0.35 * regime, 0.0, 1.0)
+    )
     return pred, confidence, combined_ood
 
 
@@ -271,6 +314,9 @@ def apply_full_arch_gate(
         raise ValueError(f"V8 prediction shape invalid: {out.shape}")
 
     detail = {}
+    analog_cache: Dict[tuple, tuple[np.ndarray, float, float]] = {}
+    regime_cache: Dict[int, float] = {}
+
     for target_idx, target in enumerate(TARGET_COLUMNS):
         tcfg = _CONFIG["targets"].get(target, {})
         if not tcfg.get("enabled", False):
@@ -288,16 +334,40 @@ def apply_full_arch_gate(
                 mode=str(ac["mode"]),
                 self_guard=int(ac["self_guard"]),
             )
-            bank = _BANKS[(cfg.context, cfg.mode, target_idx)]
-            calibration = _CALIBRATIONS[(cfg.context, cfg.mode, target_idx, cfg.k)]
-            analog, confidence, combined_ood = _analog_with_confidence(
-                query_h,
+            cache_key = (
                 target_idx,
-                cfg,
-                bank,
-                calibration,
-                _HISTORIES,
+                cfg.context,
+                cfg.k,
+                cfg.mode,
+                cfg.self_guard,
             )
+            cached_analog = analog_cache.get(cache_key)
+            if cached_analog is None:
+                bank = _BANKS[(cfg.context, cfg.mode, target_idx)]
+                calibration = _CALIBRATIONS[
+                    (cfg.context, cfg.mode, target_idx, cfg.k)
+                ]
+                regime = regime_cache.get(target_idx)
+                if regime is None:
+                    regime = _regime_ood(
+                        query_h,
+                        target_idx,
+                        _HISTORIES,
+                    )
+                    regime_cache[target_idx] = regime
+
+                cached_analog = _analog_with_confidence(
+                    query_h,
+                    target_idx,
+                    cfg,
+                    bank,
+                    calibration,
+                    _HISTORIES,
+                    regime_value=regime,
+                )
+                analog_cache[cache_key] = cached_analog
+
+            analog, confidence, combined_ood = cached_analog
 
             alpha = float(seg["alpha"])
             ood_power = float(seg["ood_power"])
