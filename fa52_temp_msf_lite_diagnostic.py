@@ -18,8 +18,9 @@ from v9_analog_multiscale_diagnostic import evaluate_rows, proxy_gain
 
 
 ROOT = Path(__file__).resolve().parent
-OUT_JSON = MODEL_DIR / "fa52_temp_msf_lite_candidate.json"
-OUT_NPZ = MODEL_DIR / "fa52_temp_msf_lite_candidate.npz"
+OUT_DIR = ROOT / "artifacts" / "fa52_safe"
+OUT_JSON = OUT_DIR / "fa52_temp_msf_lite_candidate.json"
+OUT_NPZ = OUT_DIR / "fa52_temp_msf_lite_candidate.npz"
 
 TEMP_NAME = "temperature_c"
 TEMP_IDX = TARGET_COLUMNS.index(TEMP_NAME)
@@ -389,6 +390,7 @@ def mean_proxy_and_trend(truth, pred, anchors):
 
 
 def main() -> int:
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     print("=" * 118)
     print("FA52.895 + TEMPERATURE-ONLY MSF-LITE OFFLINE DIAGNOSTIC")
     print("=" * 118)
