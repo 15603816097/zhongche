@@ -57,6 +57,47 @@ LGB_INFER_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="lgb-infer",
 )
 
+# Optional per-estimator thread caps. Zero means "leave the serialized model
+# setting untouched", which preserves the exact frozen Full Architecture
+# baseline for A/B testing. Candidate services can set these to 1 to avoid
+# nested oversubscription.
+LGB_ESTIMATOR_THREADS = max(
+    0, int(os.getenv("LGB_ESTIMATOR_THREADS", "0"))
+)
+XGB_INFER_THREADS = max(
+    0, int(os.getenv("XGB_INFER_THREADS", "0"))
+)
+
+
+def _set_model_threads(model, n_threads: int) -> None:
+    if n_threads <= 0 or model is None:
+        return
+
+    estimators = getattr(model, "estimators_", None)
+    if estimators is not None:
+        for est in estimators:
+            try:
+                est.set_params(n_jobs=n_threads)
+            except Exception:
+                try:
+                    est.set_params(num_threads=n_threads)
+                except Exception:
+                    pass
+
+    try:
+        model.set_params(n_jobs=n_threads)
+    except Exception:
+        try:
+            model.set_params(num_threads=n_threads)
+        except Exception:
+            pass
+
+    try:
+        booster = model.get_booster()
+        booster.set_param({"nthread": int(n_threads)})
+    except Exception:
+        pass
+
 
 def load_models():
     global _model_lgb, _model_xgb
@@ -65,12 +106,14 @@ def load_models():
     if _model_lgb is None:
         with open(MODEL_DIR / "model_lgb.pkl", "rb") as f:
             _model_lgb = pickle.load(f)
+        _set_model_threads(_model_lgb, LGB_ESTIMATOR_THREADS)
         with open(MODEL_DIR / "scaler.pkl", "rb") as f:
             _scalers_lgb = pickle.load(f)
 
     if _model_xgb is None:
         with open(MODEL_DIR / "model_xgb.pkl", "rb") as f:
             _model_xgb = pickle.load(f)
+        _set_model_threads(_model_xgb, XGB_INFER_THREADS)
         with open(MODEL_DIR / "scaler_xgb.pkl", "rb") as f:
             _scalers_xgb = pickle.load(f)
 
