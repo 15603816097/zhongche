@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import threading
 import time
 from pathlib import Path
@@ -30,11 +31,19 @@ from full_arch_stage4_confidence_ood import (
 ROOT = Path(__file__).resolve().parents[1]
 FROZEN_GATE_CONFIG_PATH = ROOT / "full_arch_frozen_gate_v1.json"
 GENERATED_GATE_CONFIG_PATH = MODEL_DIR / "full_arch" / "dynamic_gate_config.json"
-GATE_CONFIG_PATH = (
-    FROZEN_GATE_CONFIG_PATH
-    if FROZEN_GATE_CONFIG_PATH.is_file()
-    else GENERATED_GATE_CONFIG_PATH
-)
+
+_GATE_OVERRIDE = os.getenv("FULL_ARCH_GATE_CONFIG", "").strip()
+if _GATE_OVERRIDE:
+    override_path = Path(_GATE_OVERRIDE).expanduser()
+    if not override_path.is_absolute():
+        override_path = ROOT / override_path
+    GATE_CONFIG_PATH = override_path
+else:
+    GATE_CONFIG_PATH = (
+        FROZEN_GATE_CONFIG_PATH
+        if FROZEN_GATE_CONFIG_PATH.is_file()
+        else GENERATED_GATE_CONFIG_PATH
+    )
 
 _LOCK = threading.Lock()
 _READY = False
