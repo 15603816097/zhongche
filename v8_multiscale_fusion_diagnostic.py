@@ -123,23 +123,53 @@ def pooled_metrics(truth, pred, anchors, idx, target_idx):
 
 
 def seq_metrics(truth, base, cand, anchors, target_idx):
+    """
+    Evaluate one target sequence-by-sequence.
+
+    truth keeps the full shape (N, H, C), while base/cand passed by
+    choose_fixed are already sliced to a single target and therefore have
+    shape (N, H). Keep that contract explicit to avoid accidental 3-D indexing.
+    """
+    truth = np.asarray(truth, dtype=np.float64)
+    base = np.asarray(base, dtype=np.float64)
+    cand = np.asarray(cand, dtype=np.float64)
+    anchors = np.asarray(anchors, dtype=np.float64)
+
+    expected_2d = (len(truth), HORIZON)
+    if base.shape != expected_2d:
+        raise ValueError(
+            f"seq_metrics base shape={base.shape}, expected={expected_2d}"
+        )
+    if cand.shape != expected_2d:
+        raise ValueError(
+            f"seq_metrics cand shape={cand.shape}, expected={expected_2d}"
+        )
+    if truth.ndim != 3 or truth.shape[0] != len(base):
+        raise ValueError(f"seq_metrics truth shape invalid: {truth.shape}")
+    if anchors.ndim != 2 or anchors.shape[0] != len(base):
+        raise ValueError(f"seq_metrics anchors shape invalid: {anchors.shape}")
+
     rows = []
     for i in range(len(truth)):
         b = evaluate_rows(
-            truth[i:i+1, :, target_idx],
-            base[i:i+1, :, target_idx],
-            anchors[i:i+1, target_idx],
+            truth[i:i + 1, :, target_idx],
+            base[i:i + 1, :],
+            anchors[i:i + 1, target_idx],
         )
-        c = evaluate_rows(
-            truth[i:i+1, :, target_idx],
-            cand[i:i+1, :, target_idx],
-            anchors[i:i+1, target_idx],
+        cand_metrics = evaluate_rows(
+            truth[i:i + 1, :, target_idx],
+            cand[i:i + 1, :],
+            anchors[i:i + 1, target_idx],
         )
         rows.append(
             {
-                "proxy_gain": proxy_gain(b, c),
-                "trend_gain": float(c["trend_core"] - b["trend_core"]),
-                "rmse_ratio": float(c["rmse"] / max(b["rmse"], EPS)),
+                "proxy_gain": proxy_gain(b, cand_metrics),
+                "trend_gain": float(
+                    cand_metrics["trend_core"] - b["trend_core"]
+                ),
+                "rmse_ratio": float(
+                    cand_metrics["rmse"] / max(b["rmse"], EPS)
+                ),
             }
         )
     return rows
